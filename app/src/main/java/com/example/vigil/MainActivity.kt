@@ -9,8 +9,6 @@ import android.graphics.RectF
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
-import android.os.VibrationEffect
-import android.os.Vibrator
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
@@ -176,6 +174,11 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         
         val detector = remember { Yolov8Detector(context) }
+        DisposableEffect(detector) {
+            onDispose {
+                detector.close()
+            }
+        }
         val storage = remember { DetectionStorage(context) }
         
         var statusText by remember { mutableStateOf("Loading model...") }
@@ -190,11 +193,8 @@ class MainActivity : ComponentActivity() {
         
         var autoZoomActive by remember { mutableStateOf(true) }
         var showStats by remember { mutableStateOf(true) }
-        var showGrid by remember { mutableStateOf(false) }
         var targetZoom by remember { mutableFloatStateOf(1f) }
         
-        val vibrator = remember { context.getSystemService(Vibrator::class.java) }
-
         // Animations
         val infiniteTransition = rememberInfiniteTransition()
         val pulseAlpha by infiniteTransition.animateFloat(
@@ -331,9 +331,6 @@ class MainActivity : ComponentActivity() {
                 },
                 modifier = Modifier.fillMaxSize()
             )
-
-            // Grid Overlay (toggleable)
-            GridOverlay(show = showGrid)
 
             // Detection Overlay - Modern Style
             Canvas(modifier = Modifier.fillMaxSize()) {
@@ -543,12 +540,9 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // ZOOM button with icon
+                        // ZOOM button
                         Button(
-                            onClick = { 
-                                autoZoomActive = !autoZoomActive 
-                                if (!autoZoomActive) targetZoom = 1f
-                            },
+                            onClick = { autoZoomActive = !autoZoomActive },
                             modifier = Modifier.weight(1f).height(44.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = if (autoZoomActive) Color(0xFF00FF41).copy(alpha = 0.2f) else Color(0xFF1A1A1A)
@@ -577,7 +571,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         
-                        // LOGS button with icon
+                        // LOGS button
                         Button(
                             onClick = { showLogs = !showLogs },
                             modifier = Modifier.weight(1f).height(44.dp),
@@ -608,42 +602,7 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         
-                        IconButton(
-                            onClick = { 
-                                showGrid = !showGrid
-                                // Add haptic feedback
-                                vibrator?.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
-                            },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(
-                                    color = if (showGrid) Color(0xFF00FF41).copy(alpha = 0.3f) else Color.Transparent,
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                                .border(
-                                    width = 2.dp,
-                                    color = if (showGrid) Color(0xFF00FF41) else Color.Gray.copy(alpha = 0.3f),
-                                    shape = RoundedCornerShape(8.dp)
-                                )
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Icon(
-                                    Icons.Default.GridOn,
-                                    contentDescription = if (showGrid) "Grid: ON" else "Grid: OFF",
-                                    tint = if (showGrid) Color(0xFF00FF41) else Color.Gray,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                if (showGrid) {
-                                    Text(
-                                        text = "ON",
-                                        color = Color(0xFF00FF41),
-                                        fontSize = 8.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-                        }
-                        
+                        // CLEAR button (keep this)
                         IconButton(
                             onClick = { 
                                 storage.clearLogs()
@@ -936,68 +895,6 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error in cropDetection", e)
             null
-        }
-    }
-
-    @Composable
-    fun GridOverlay(show: Boolean, modifier: Modifier = Modifier) {
-        if (!show) return
-        
-        Canvas(modifier = modifier.fillMaxSize()) {
-            val stepX = size.width / 3f
-            val stepY = size.height / 3f
-            val gridColor = Color.White.copy(alpha = 0.2f)
-            val centerColor = Color(0xFF00FF41).copy(alpha = 0.1f)
-            
-            // Vertical lines
-            for (i in 1..2) {
-                drawLine(
-                    color = gridColor,
-                    start = Offset(stepX * i, 0f),
-                    end = Offset(stepX * i, size.height),
-                    strokeWidth = 1.5f
-                )
-            }
-            
-            // Horizontal lines
-            for (i in 1..2) {
-                drawLine(
-                    color = gridColor,
-                    start = Offset(0f, stepY * i),
-                    end = Offset(size.width, stepY * i),
-                    strokeWidth = 1.5f
-                )
-            }
-            
-            // Center crosshair (subtle)
-            val crossSize = 20f
-            val centerX = size.width / 2
-            val centerY = size.height / 2
-            
-            drawLine(
-                color = centerColor,
-                start = Offset(centerX - crossSize, centerY),
-                end = Offset(centerX - 8f, centerY),
-                strokeWidth = 2f
-            )
-            drawLine(
-                color = centerColor,
-                start = Offset(centerX + 8f, centerY),
-                end = Offset(centerX + crossSize, centerY),
-                strokeWidth = 2f
-            )
-            drawLine(
-                color = centerColor,
-                start = Offset(centerX, centerY - crossSize),
-                end = Offset(centerX, centerY - 8f),
-                strokeWidth = 2f
-            )
-            drawLine(
-                color = centerColor,
-                start = Offset(centerX, centerY + 8f),
-                end = Offset(centerX, centerY + crossSize),
-                strokeWidth = 2f
-            )
         }
     }
 
