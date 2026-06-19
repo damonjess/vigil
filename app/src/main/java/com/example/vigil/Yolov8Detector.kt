@@ -3,6 +3,7 @@ package com.example.vigil
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -93,7 +94,19 @@ class Yolov8Detector(context: Context) {
             val afd = context.assets.openFd(MODEL_PATH)
             val buffer: MappedByteBuffer = FileInputStream(afd.fileDescriptor).channel
                 .map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
-            interpreter = Interpreter(buffer, Interpreter.Options().apply { setNumThreads(4) })
+            
+            // Enable GPU acceleration
+            val options = Interpreter.Options().apply { 
+                setNumThreads(4)
+                // Add GPU delegate if available
+                try {
+                    val gpuDelegate = org.tensorflow.lite.gpu.GpuDelegate()
+                    addDelegate(gpuDelegate)
+                } catch (e: Exception) {
+                    Log.w("Yolov8Detector", "GPU not available, using CPU")
+                }
+            }
+            interpreter = Interpreter(buffer, options)
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
         }

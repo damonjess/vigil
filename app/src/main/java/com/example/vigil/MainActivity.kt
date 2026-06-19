@@ -2,14 +2,19 @@ package com.example.vigil
 
 import android.Manifest
 import android.content.ContentValues
-import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,8 +24,10 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,6 +35,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -36,8 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -50,23 +57,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
+import androidx.core.content.FileProvider
+import androidx.core.graphics.scale
 import coil.compose.AsyncImage
 import com.example.vigil.data.DetectionLog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
-import java.io.FileOutputStream
-import android.content.pm.PackageManager
+import kotlin.time.Duration.Companion.milliseconds
 
 class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "MainActivity"
-        private const val FRAME_INTERVAL_MS = 66L // ~15 FPS
+        private const val FRAME_INTERVAL_MS = 33L
         private const val ZOOM_LEVEL = 3.5f
         private const val PERSON_CONFIDENCE_THRESHOLD = 0.35f
-        private const val VEHICLE_CONFIDENCE_THRESHOLD = 0.30f
         private const val MIN_PERSON_AREA = 0.01f
+        private const val DETECTION_COOLDOWN_MS = 100L
     }
 
     private var lastFrameTime = 0L
@@ -74,10 +81,21 @@ class MainActivity : ComponentActivity() {
     private var lastFpsUpdate = 0L
     private var currentFps = 0
     private var lastZoomTime = 0L
-    private var isZooming = false
     private var hasPersonDetected = false
     private var personDetectionCount = 0
     private var lastPersonTimestamp = 0L
+    private var lastDetectionTime = 0L
+
+
+    private val storagePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            Toast.makeText(this, "Storage permission granted", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Storage permission needed to save images", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -116,20 +134,35 @@ class MainActivity : ComponentActivity() {
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Camera,
+                        contentDescription = null,
+                        tint = Color(0xFF00FF41),
+                        modifier = Modifier.size(64.dp)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "Camera Access Required",
                         color = Color(0xFF00FF41),
                         fontSize = 24.sp,
                         fontFamily = FontFamily.Monospace
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Vigil needs camera access for AI detection",
+                        color = Color.Gray,
+                        fontSize = 14.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
                     Button(
                         onClick = { launcher.launch(Manifest.permission.CAMERA) },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = Color(0xFF00FF41)
-                        )
+                        ),
+                        shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text("Grant Permission", color = Color.Black)
+                        Text("Grant Permission", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -154,27 +187,36 @@ class MainActivity : ComponentActivity() {
         var statsText by remember { mutableStateOf("Stats: ...") }
         var showLogs by remember { mutableStateOf(false) }
         var selectedLog by remember { mutableStateOf<DetectionLog?>(null) }
-        var zoomLevel by remember { mutableStateOf(1f) }
-        var targetZoom by remember { mutableStateOf(1f) }
         
-        // Auto-zoom state
-        var targetPerson by remember { mutableStateOf<Detection?>(null) }
-        var autoZoomActive by remember { mutableStateOf(false) }
+        var autoZoomActive by remember { mutableStateOf(true) }
+        var showStats by remember { mutableStateOf(true) }
+        var showGrid by remember { mutableStateOf(false) }
+        var targetZoom by remember { mutableFloatStateOf(1f) }
         
-        // Detection tracking for speed
-        var previousDetections by remember { mutableStateOf<List<Detection>>(emptyList()) }
+        val vibrator = remember { context.getSystemService(Vibrator::class.java) }
+
+        // Animations
+        val infiniteTransition = rememberInfiniteTransition()
+        val pulseAlpha by infiniteTransition.animateFloat(
+            initialValue = 0.3f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(1000, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse
+            )
+        )
 
         // Monitor model status
         LaunchedEffect(detector) {
             while (true) {
                 modelReady = detector.isReady()
                 statusText = if (modelReady) {
-                    "Model Ready ✅ | ${detections.size} detections"
+                    "Active"
                 } else {
                     "Model FAILED: ${detector.lastError ?: "Unknown error"}"
                 }
                 statsText = storage.getDetectionStats()
-                delay(500)
+                delay(500.milliseconds)
             }
         }
 
@@ -182,7 +224,7 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(Unit) {
             while (true) {
                 recentLogs = storage.getRecentLogs(20)
-                delay(2000)
+                delay(2000.milliseconds)
             }
         }
 
@@ -202,11 +244,26 @@ class MainActivity : ComponentActivity() {
                         val analysis = androidx.camera.core.ImageAnalysis.Builder()
                             .setOutputImageFormat(androidx.camera.core.ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                             .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setTargetResolution(android.util.Size(1920, 1080))
+                            .setResolutionSelector(
+                                androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        androidx.camera.core.resolutionselector.ResolutionStrategy(
+                                            android.util.Size(1920, 1080),
+                                            androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                        )
+                                    )
+                                    .build()
+                            )
                             .build()
                             .also {
                                 it.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
                                     val currentTime = System.currentTimeMillis()
+                                    if (currentTime - lastDetectionTime < DETECTION_COOLDOWN_MS) {
+                                        imageProxy.close()
+                                        return@setAnalyzer
+                                    }
+                                    lastDetectionTime = currentTime
+
                                     if (currentTime - lastFrameTime >= FRAME_INTERVAL_MS) {
                                         lastFrameTime = currentTime
                                         frameCount++
@@ -227,7 +284,6 @@ class MainActivity : ComponentActivity() {
                                                         val results = detector.detect(bitmap)
                                                         detections = results
                                                         
-                                                        // Auto-zoom for persons
                                                         handleAutoZoom(
                                                             results = results,
                                                             bitmap = bitmap,
@@ -235,21 +291,17 @@ class MainActivity : ComponentActivity() {
                                                             onZoom = { zoom -> targetZoom = zoom },
                                                             onPersonDetected = { person, zoomed ->
                                                                 scope.launch {
-                                                                    val log = storage.saveDetection(
+                                                                    storage.saveDetection(
                                                                         detection = person,
                                                                         originalBitmap = bitmap,
                                                                         zoomedBitmap = zoomed
                                                                     )
-                                                                    // Update UI
                                                                     recentLogs = storage.getRecentLogs(20)
                                                                     personDetectionCount++
                                                                     lastPersonTimestamp = System.currentTimeMillis()
                                                                 }
                                                             }
                                                         )
-                                                        
-                                                        statusText = "Detections: ${results.size} | " +
-                                                            "${detector.peakRelevantLabel} ${(detector.peakRelevantScore * 100).toInt()}%"
                                                     } catch (e: Exception) {
                                                         Log.e(TAG, "Detection error", e)
                                                     } finally {
@@ -280,7 +332,10 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Detection Overlay with person highlighting
+            // Grid Overlay (toggleable)
+            GridOverlay(show = showGrid)
+
+            // Detection Overlay - Modern Style
             Canvas(modifier = Modifier.fillMaxSize()) {
                 detections.forEach { det ->
                     val left = det.bounds.left * size.width
@@ -288,229 +343,355 @@ class MainActivity : ComponentActivity() {
                     val right = det.bounds.right * size.width
                     val bottom = det.bounds.bottom * size.height
 
-                    // Color based on class
                     val isPerson = det.classId == 0
                     val isVehicle = det.classId in setOf(1, 2, 3, 5, 7)
+                    
                     val color = when {
-                        isPerson -> Color.Cyan
-                        isVehicle -> Color.Yellow
-                        else -> Color.Magenta
+                        isPerson -> Color(0xFF00FF41) // Neon Green
+                        isVehicle -> Color(0xFFFF6B00) // Orange
+                        else -> Color(0xFF00E5FF) // Cyan
                     }
 
-                    // Highlight persons with thicker border
-                    val strokeWidth = if (isPerson && det.confidence > 0.5f) 5f else 3f
-                    val cornerSize = if (isPerson) 25f else 20f
+                    val glowColor = color.copy(alpha = 0.2f)
+                    val strokeWidth = if (isPerson) 4f else 3f
 
-                    // Main box with glow effect for persons
+                    // Glow effect (outer box)
                     drawRect(
-                        color = if (isPerson) color.copy(alpha = 0.2f) else color.copy(alpha = 0.3f),
+                        color = glowColor,
+                        topLeft = Offset(left - 4f, top - 4f),
+                        size = Size(right - left + 8f, bottom - top + 8f),
+                        style = Stroke(width = 12f)
+                    )
+
+                    // Main box with rounded corners
+                    drawRoundRect(
+                        color = color,
                         topLeft = Offset(left, top),
                         size = Size(right - left, bottom - top),
-                        style = Stroke(width = strokeWidth)
+                        style = Stroke(width = strokeWidth),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(8f, 8f)
                     )
 
                     // Corner accents
-                    drawLine(color, Offset(left, top + cornerSize), Offset(left, top), strokeWidth)
-                    drawLine(color, Offset(left, top), Offset(left + cornerSize, top), strokeWidth)
-                    drawLine(color, Offset(right - cornerSize, top), Offset(right, top), strokeWidth)
-                    drawLine(color, Offset(right, top), Offset(right, top + cornerSize), strokeWidth)
-                    drawLine(color, Offset(left, bottom - cornerSize), Offset(left, bottom), strokeWidth)
-                    drawLine(color, Offset(left, bottom), Offset(left + cornerSize, bottom), strokeWidth)
-                    drawLine(color, Offset(right - cornerSize, bottom), Offset(right, bottom), strokeWidth)
-                    drawLine(color, Offset(right, bottom), Offset(right, bottom - cornerSize), strokeWidth)
+                    val cornerSize = 20f
+                    val accentStroke = 3f
+                    
+                    // Top-left
+                    drawLine(color, Offset(left + 4f, top + cornerSize), Offset(left + 4f, top + 4f), accentStroke)
+                    drawLine(color, Offset(left + 4f, top + 4f), Offset(left + cornerSize, top + 4f), accentStroke)
+                    
+                    // Top-right
+                    drawLine(color, Offset(right - 4f, top + cornerSize), Offset(right - 4f, top + 4f), accentStroke)
+                    drawLine(color, Offset(right - 4f, top + 4f), Offset(right - cornerSize, top + 4f), accentStroke)
+                    
+                    // Bottom-left
+                    drawLine(color, Offset(left + 4f, bottom - cornerSize), Offset(left + 4f, bottom - 4f), accentStroke)
+                    drawLine(color, Offset(left + 4f, bottom - 4f), Offset(left + cornerSize, bottom - 4f), accentStroke)
+                    
+                    // Bottom-right
+                    drawLine(color, Offset(right - 4f, bottom - cornerSize), Offset(right - 4f, bottom - 4f), accentStroke)
+                    drawLine(color, Offset(right - 4f, bottom - 4f), Offset(right - cornerSize, bottom - 4f), accentStroke)
 
-                    // Label with class indicator
-                    val labelText = if (isPerson) "👤 ${det.label} ${(det.confidence * 100).toInt()}%" else
-                        if (isVehicle) "🚗 ${det.label} ${(det.confidence * 100).toInt()}%" else
-                        "${det.label} ${(det.confidence * 100).toInt()}%"
+                    // Label with modern styling
+                    val confidenceText = "${(det.confidence * 100).toInt()}%"
+                    val labelText = if (isPerson) "👤 ${det.label}" else if (isVehicle) "🚗 ${det.label}" else det.label
+                    val displayText = "$labelText $confidenceText"
                     
                     drawContext.canvas.nativeCanvas.apply {
                         val paint = android.graphics.Paint().apply {
                             this.color = color.toArgb()
-                            textSize = if (isPerson) 44f else 36f
-                            typeface = android.graphics.Typeface.MONOSPACE
+                            textSize = 40f
+                            typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
                             isAntiAlias = true
-                            isFakeBoldText = true
                         }
+                        
                         val bgPaint = android.graphics.Paint().apply {
-                            this.color = android.graphics.Color.argb(180, 0, 0, 0)
+                            this.color = android.graphics.Color.argb(200, 0, 0, 0)
                         }
-                        val textWidth = paint.measureText(labelText)
-                        drawRect(left + 4f, top - 44f - 4f, left + textWidth + 20f, top + 4f, bgPaint)
-                        drawText(labelText, left + 8f, top - 8f, paint)
+                        
+                        val textWidth = paint.measureText(displayText)
+                        val padding = 12f
+                        val height = 44f
+                        
+                        // Background pill
+                        drawRoundRect(
+                            left + 4f,
+                            top - height - 4f,
+                            left + textWidth + padding * 2 + 8f,
+                            top + 4f,
+                            8f,
+                            8f,
+                            bgPaint
+                        )
+                        
+                        // Border pill
+                        this.drawRoundRect(
+                            left + 4f,
+                            top - height - 4f,
+                            left + textWidth + padding * 2 + 8f,
+                            top + 4f,
+                            8f,
+                            8f,
+                            android.graphics.Paint().apply {
+                                val pColor = color.toArgb()
+                                this.color = pColor
+                                style = android.graphics.Paint.Style.STROKE
+                                setStrokeWidth(1f)
+                            }
+                        )
+                        
+                        drawText(displayText, left + padding + 8f, top - 8f, paint)
+                    }
+                }
+            }
+
+            // Scanning animation overlay
+            if (detections.isEmpty()) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val scanY = size.height * (0.3f + 0.4f * (System.currentTimeMillis() % 3000) / 3000f)
+                    drawLine(
+                        color = Color(0xFF00FF41).copy(alpha = 0.15f),
+                        start = Offset(0f, scanY),
+                        end = Offset(size.width, scanY),
+                        strokeWidth = 2f
+                    )
+                }
+            }
+
+            // Top Status Bar - Modern Glass Effect
+            Surface(
+                color = Color.Black.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(0.dp, 0.dp, 16.dp, 16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .align(Alignment.TopCenter)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // App Name with pulse dot
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    color = if (modelReady) Color(0xFF00FF41).copy(alpha = pulseAlpha) else Color.Red,
+                                    shape = CircleShape
+                                )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "VIGIL",
+                            color = Color(0xFF00FF41),
+                            fontSize = 18.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.sp
+                        )
                     }
                     
-                    // Speed indicator for vehicles
-                    if (isVehicle && det.confidence > 0.5f) {
-                        // Speed tracking would be added here
+                    // Status indicators
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        StatusPill(
+                            text = detections.size.toString(),
+                            icon = Icons.Default.Visibility,
+                            color = Color(0xFF00FF41)
+                        )
+                        StatusPill(
+                            text = fpsText,
+                            icon = Icons.Default.Speed,
+                            color = Color(0xFF00E5FF)
+                        )
                     }
                 }
             }
 
-            // Auto-zoom indicator
-            AnimatedVisibility(
-                visible = autoZoomActive,
-                enter = fadeIn() + slideInVertically(),
-                exit = fadeOut() + slideOutVertically()
-            ) {
-                Surface(
-                    color = Color.Cyan.copy(alpha = 0.9f),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .padding(16.dp)
-                        .align(Alignment.TopCenter)
-                ) {
-                    Text(
-                        text = "🔍 ZOOMING ON PERSON",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                    )
-                }
-            }
-
-            // Person detection counter
+            // Bottom Controls - Modern Floating Bar
             Surface(
                 color = Color.Black.copy(alpha = 0.8f),
-                shape = RoundedCornerShape(8.dp),
+                shape = RoundedCornerShape(16.dp, 16.dp, 0.dp, 0.dp),
                 modifier = Modifier
-                    .padding(16.dp)
-                    .align(Alignment.TopEnd)
-            ) {
-                Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.End) {
-                    Text(
-                        text = "👤 $personDetectionCount",
-                        color = Color.Cyan,
-                        fontSize = 18.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "🚗 ${detections.count { it.classId in setOf(1, 2, 3, 5, 7) }}",
-                        color = Color.Yellow,
-                        fontSize = 14.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            // HUD Overlay - Top Left
-            Surface(
-                color = Color.Black.copy(alpha = 0.8f),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .padding(16.dp)
-                    .align(Alignment.TopStart)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = "VIGIL AI",
-                        color = Color(0xFF00FF41),
-                        fontSize = 18.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        text = statusText,
-                        color = if (modelReady) Color.Green else Color.Red,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        text = fpsText,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        text = statsText,
-                        color = Color(0xFF00E5FF),
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
-
-            // Bottom Controls
-            Row(
-                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp)
                     .align(Alignment.BottomCenter)
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
-                    onClick = { 
-                        autoZoomActive = !autoZoomActive 
-                        if (!autoZoomActive) targetZoom = 1f
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (autoZoomActive) Color.Cyan else Color(0xFF333333)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
+                Column(
+                    modifier = Modifier.padding(16.dp)
                 ) {
-                    Text(
-                        if (autoZoomActive) "🔍 AUTO-ZOOM ON" else "AUTO-ZOOM",
-                        color = if (autoZoomActive) Color.Black else Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-                
-                Button(
-                    onClick = { showLogs = !showLogs },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (showLogs) Color(0xFFFF6B00) else Color(0xFF333333)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        "📋 LOGS",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-                
-                Button(
-                    onClick = { 
-                        storage.clearLogs()
-                        personDetectionCount = 0
-                        recentLogs = emptyList()
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFCC0000)
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text(
-                        "🗑️ CLEAR",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
+                    // Stats row
+                    if (showStats) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            StatItem("👤", personDetectionCount.toString(), Color(0xFF00FF41))
+                            StatItem("🚗", detections.count { it.classId in setOf(1, 2, 3, 5, 7) }.toString(), Color(0xFFFF6B00))
+                            StatItem("📊", statsText.take(20), Color(0xFF00E5FF))
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                        Spacer(modifier = Modifier.height(12.dp))
+                    }
+                    
+                    // Control buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // ZOOM button with icon
+                        Button(
+                            onClick = { 
+                                autoZoomActive = !autoZoomActive 
+                                if (!autoZoomActive) targetZoom = 1f
+                            },
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (autoZoomActive) Color(0xFF00FF41).copy(alpha = 0.2f) else Color(0xFF1A1A1A)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (autoZoomActive) Color(0xFF00FF41) else Color.Gray.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    if (autoZoomActive) Icons.Default.ZoomIn else Icons.Default.ZoomOut,
+                                    contentDescription = null,
+                                    tint = if (autoZoomActive) Color(0xFF00FF41) else Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (autoZoomActive) "ZOOM ON" else "ZOOM",
+                                    color = if (autoZoomActive) Color(0xFF00FF41) else Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (autoZoomActive) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                        
+                        // LOGS button with icon
+                        Button(
+                            onClick = { showLogs = !showLogs },
+                            modifier = Modifier.weight(1f).height(44.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (showLogs) Color(0xFFFF6B00).copy(alpha = 0.2f) else Color(0xFF1A1A1A)
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (showLogs) Color(0xFFFF6B00) else Color.Gray.copy(alpha = 0.3f)
+                            )
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.List,
+                                    contentDescription = null,
+                                    tint = if (showLogs) Color(0xFFFF6B00) else Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "LOGS (${recentLogs.size})",
+                                    color = if (showLogs) Color(0xFFFF6B00) else Color.White,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = if (showLogs) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+                        
+                        IconButton(
+                            onClick = { 
+                                showGrid = !showGrid
+                                // Add haptic feedback
+                                vibrator?.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+                            },
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(
+                                    color = if (showGrid) Color(0xFF00FF41).copy(alpha = 0.3f) else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .border(
+                                    width = 2.dp,
+                                    color = if (showGrid) Color(0xFF00FF41) else Color.Gray.copy(alpha = 0.3f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(
+                                    Icons.Default.GridOn,
+                                    contentDescription = if (showGrid) "Grid: ON" else "Grid: OFF",
+                                    tint = if (showGrid) Color(0xFF00FF41) else Color.Gray,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                if (showGrid) {
+                                    Text(
+                                        text = "ON",
+                                        color = Color(0xFF00FF41),
+                                        fontSize = 8.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                        
+                        IconButton(
+                            onClick = { 
+                                storage.clearLogs()
+                                personDetectionCount = 0
+                                recentLogs = emptyList()
+                            },
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(
+                                    color = Color.Red.copy(alpha = 0.2f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .border(
+                                    width = 1.dp,
+                                    color = Color.Red.copy(alpha = 0.3f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Clear",
+                                tint = Color.Red
+                            )
+                        }
+                    }
                 }
             }
 
-            // Logs Panel
+            // Logs Panel - Modern Slide-up
             AnimatedVisibility(
                 visible = showLogs,
-                enter = slideInVertically() + fadeIn(),
-                exit = slideOutVertically() + fadeOut()
+                modifier = Modifier.align(Alignment.BottomCenter),
+                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
             ) {
                 Surface(
                     color = Color(0xFF1A1A1A),
                     shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(300.dp)
-                        .align(Alignment.BottomCenter)
+                        .height(320.dp)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(16.dp)
                     ) {
+                        // Header
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -519,24 +700,58 @@ class MainActivity : ComponentActivity() {
                             Text(
                                 text = "📋 DETECTION LOGS (${recentLogs.size})",
                                 color = Color(0xFF00FF41),
-                                fontSize = 16.sp,
+                                fontSize = 14.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold
                             )
-                            IconButton(onClick = { showLogs = false }) {
-                                Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                            Row {
+                                // Export All button
+                                IconButton(
+                                    onClick = { 
+                                        if (recentLogs.isNotEmpty()) {
+                                            exportAllToGallery(recentLogs)
+                                        } else {
+                                            Toast.makeText(context, "No logs to export", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Save,
+                                        contentDescription = "Export All",
+                                        tint = Color(0xFF00FF41),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                
+                                Spacer(modifier = Modifier.width(4.dp))
+                                
+                                IconButton(
+                                    onClick = { showLogs = false },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Close,
+                                        contentDescription = "Close",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
                         }
                         
                         Spacer(modifier = Modifier.height(8.dp))
                         
+                        // Log list
                         LazyColumn(
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             items(recentLogs) { log ->
-                                DetectionLogItem(
+                                ModernDetectionLogItem(
                                     log = log,
-                                    onClick = { selectedLog = log }
+                                    onClick = { selectedLog = log },
+                                    onExport = { exportToGallery(it) },
+                                    onShare = { shareImage(it) }
                                 )
                             }
                         }
@@ -544,7 +759,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // Detail Dialog for selected log
+            // Detail Dialog
             selectedLog?.let { log ->
                 AlertDialog(
                     onDismissRequest = { selectedLog = null },
@@ -564,23 +779,34 @@ class MainActivity : ComponentActivity() {
                             
                             Spacer(modifier = Modifier.height(8.dp))
                             
-                            // Show thumbnail if available
-                            log.thumbnailPath?.let { path ->
-                                AsyncImage(
-                                    model = File(path),
-                                    contentDescription = "Detection thumbnail",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(150.dp)
-                                        .background(Color.Black),
-                                    contentScale = ContentScale.Crop
-                                )
+                            log.imagePath?.let { path ->
+                                val file = File(path)
+                                if (file.exists()) {
+                                    AsyncImage(
+                                        model = file,
+                                        contentDescription = "Detection",
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(200.dp)
+                                            .background(Color.Black)
+                                            .clip(RoundedCornerShape(8.dp)),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
                             }
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = { selectedLog = null }) {
-                            Text("Close", color = Color(0xFF00FF41))
+                        Row {
+                            TextButton(onClick = { shareImage(log) }) {
+                                Text("Share", color = Color(0xFF00E5FF))
+                            }
+                            TextButton(onClick = { exportToGallery(log) }) {
+                                Text("Save", color = Color(0xFF00FF41))
+                            }
+                            TextButton(onClick = { selectedLog = null }) {
+                                Text("Close", color = Color.Gray)
+                            }
                         }
                     },
                     containerColor = Color(0xFF1A1A1A)
@@ -697,7 +923,7 @@ class MainActivity : ComponentActivity() {
                 val scale = maxOf(minSize.toFloat() / width, minSize.toFloat() / height)
                 val newWidth = (width * scale).toInt()
                 val newHeight = (height * scale).toInt()
-                Bitmap.createScaledBitmap(cropped, newWidth, newHeight, true).also {
+                cropped.scale(newWidth, newHeight, true).also {
                     cropped.recycle()
                     return it
                 }
@@ -713,20 +939,119 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun logDetectionInfo(detection: Detection, bitmap: Bitmap?) {
-        Log.d(TAG, "=== Detection Info ===")
-        Log.d(TAG, "Label: ${detection.label}")
-        Log.d(TAG, "ClassId: ${detection.classId}")
-        Log.d(TAG, "Confidence: ${detection.confidence}")
-        Log.d(TAG, "Bounds: ${detection.bounds}")
-        Log.d(TAG, "Width: ${detection.bounds.width()}")
-        Log.d(TAG, "Height: ${detection.bounds.height()}")
-        Log.d(TAG, "Bitmap: ${bitmap?.width}x${bitmap?.height} ${if (bitmap?.isRecycled == true) "RECYCLED" else "OK"}")
-        Log.d(TAG, "====================")
+    @Composable
+    fun GridOverlay(show: Boolean, modifier: Modifier = Modifier) {
+        if (!show) return
+        
+        Canvas(modifier = modifier.fillMaxSize()) {
+            val stepX = size.width / 3f
+            val stepY = size.height / 3f
+            val gridColor = Color.White.copy(alpha = 0.2f)
+            val centerColor = Color(0xFF00FF41).copy(alpha = 0.1f)
+            
+            // Vertical lines
+            for (i in 1..2) {
+                drawLine(
+                    color = gridColor,
+                    start = Offset(stepX * i, 0f),
+                    end = Offset(stepX * i, size.height),
+                    strokeWidth = 1.5f
+                )
+            }
+            
+            // Horizontal lines
+            for (i in 1..2) {
+                drawLine(
+                    color = gridColor,
+                    start = Offset(0f, stepY * i),
+                    end = Offset(size.width, stepY * i),
+                    strokeWidth = 1.5f
+                )
+            }
+            
+            // Center crosshair (subtle)
+            val crossSize = 20f
+            val centerX = size.width / 2
+            val centerY = size.height / 2
+            
+            drawLine(
+                color = centerColor,
+                start = Offset(centerX - crossSize, centerY),
+                end = Offset(centerX - 8f, centerY),
+                strokeWidth = 2f
+            )
+            drawLine(
+                color = centerColor,
+                start = Offset(centerX + 8f, centerY),
+                end = Offset(centerX + crossSize, centerY),
+                strokeWidth = 2f
+            )
+            drawLine(
+                color = centerColor,
+                start = Offset(centerX, centerY - crossSize),
+                end = Offset(centerX, centerY - 8f),
+                strokeWidth = 2f
+            )
+            drawLine(
+                color = centerColor,
+                start = Offset(centerX, centerY + 8f),
+                end = Offset(centerX, centerY + crossSize),
+                strokeWidth = 2f
+            )
+        }
     }
 
     @Composable
-    fun DetectionLogItem(log: DetectionLog, onClick: () -> Unit) {
+    fun StatusPill(text: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color) {
+        Surface(
+            color = color.copy(alpha = 0.15f),
+            shape = RoundedCornerShape(12.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.3f))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = color,
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = text,
+                    color = color,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+
+    @Composable
+    fun StatItem(icon: String, text: String, color: Color) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = icon, fontSize = 14.sp)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = text,
+                color = color,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+
+    @Composable
+    fun ModernDetectionLogItem(
+        log: DetectionLog,
+        onClick: () -> Unit,
+        onExport: (DetectionLog) -> Unit,
+        onShare: (DetectionLog) -> Unit
+    ) {
         Card(
             modifier = Modifier
                 .fillMaxWidth()
@@ -734,13 +1059,13 @@ class MainActivity : ComponentActivity() {
             colors = CardDefaults.cardColors(
                 containerColor = if (log.isPerson) Color(0xFF002244) else Color(0xFF002200)
             ),
-            shape = RoundedCornerShape(4.dp)
+            shape = RoundedCornerShape(8.dp)
         ) {
             Row(
                 modifier = Modifier.padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Better image display
+                // Image
                 if (log.imagePath != null) {
                     val file = File(log.imagePath)
                     if (file.exists()) {
@@ -748,41 +1073,31 @@ class MainActivity : ComponentActivity() {
                             model = file,
                             contentDescription = "Detection",
                             modifier = Modifier
-                                .size(80.dp) // Larger preview
+                                .size(60.dp)
                                 .background(Color.Black)
                                 .clip(RoundedCornerShape(4.dp)),
                             contentScale = ContentScale.Crop
                         )
                     } else {
-                        // Fallback to thumbnail
-                        log.thumbnailPath?.let { thumbPath ->
-                            val thumbFile = File(thumbPath)
-                            if (thumbFile.exists()) {
-                                AsyncImage(
-                                    model = thumbFile,
-                                    contentDescription = "Detection",
-                                    modifier = Modifier
-                                        .size(80.dp)
-                                        .background(Color.Black)
-                                        .clip(RoundedCornerShape(4.dp)),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
+                        Box(
+                            modifier = Modifier
+                                .size(60.dp)
+                                .background(Color.DarkGray)
+                                .clip(RoundedCornerShape(4.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(text = if (log.isPerson) "👤" else "🚗", fontSize = 24.sp)
                         }
                     }
                 } else {
-                    // Placeholder
                     Box(
                         modifier = Modifier
-                            .size(80.dp)
+                            .size(60.dp)
                             .background(Color.DarkGray)
                             .clip(RoundedCornerShape(4.dp)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = if (log.isPerson) "👤" else "🚗",
-                            fontSize = 32.sp
-                        )
+                        Text(text = if (log.isPerson) "👤" else "🚗", fontSize = 24.sp)
                     }
                 }
                 
@@ -795,32 +1110,235 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Text(
                             text = log.label,
-                            color = if (log.isPerson) Color.Cyan else Color.Yellow,
-                            fontSize = 14.sp,
+                            color = if (log.isPerson) Color(0xFF00FF41) else Color(0xFFFF6B00),
+                            fontSize = 13.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
                             text = "${(log.confidence * 100).toInt()}%",
                             color = Color.White,
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace
                         )
                     }
                     Text(
                         text = log.timeOnly,
                         color = Color.Gray,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        text = "Size: ${log.imagePath?.let { File(it).length() / 1024 } ?: 0}KB",
-                        color = Color.DarkGray,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }
+                
+                // Action buttons
+                Row {
+                    // Export button
+                    IconButton(
+                        onClick = { onExport(log) },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(Color(0xFF00FF41).copy(alpha = 0.15f), CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Default.Save,
+                            contentDescription = "Export",
+                            tint = Color(0xFF00FF41),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.width(4.dp))
+                    
+                    // Share button
+                    IconButton(
+                        onClick = { onShare(log) },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(Color(0xFF00E5FF).copy(alpha = 0.15f), CircleShape)
+                    ) {
+                        Icon(
+                            Icons.Default.Share,
+                            contentDescription = "Share",
+                            tint = Color(0xFF00E5FF),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
             }
+        }
+    }
+
+    private fun exportAllToGallery(logs: List<DetectionLog>) {
+        // For Android 9 and below, check storage permission
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                Toast.makeText(this, "Grant storage permission to save images", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        val exported = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        
+        logs.forEach { log ->
+            val imagePath = log.imagePath ?: log.thumbnailPath
+            if (imagePath != null) {
+                val file = File(imagePath)
+                if (file.exists()) {
+                    if (saveToGallery(file)) {
+                        exported.add(log.label)
+                    } else {
+                        failed.add(log.label)
+                    }
+                } else {
+                    failed.add(log.label)
+                }
+            } else {
+                failed.add(log.label)
+            }
+        }
+        
+        val message = if (failed.isEmpty() && exported.isNotEmpty()) {
+            "Exported ${exported.size} images to Gallery ✓"
+        } else if (exported.isEmpty() && failed.isEmpty()) {
+            "No images to export"
+        } else {
+            "Exported ${exported.size} images. Failed: ${failed.size}"
+        }
+        
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
+
+    private fun exportToGallery(log: DetectionLog) {
+        // For Android 9 and below, check storage permission
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                Toast.makeText(this, "Grant storage permission to save images", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        try {
+            // Check if image exists
+            val imagePath = log.imagePath ?: log.thumbnailPath
+            if (imagePath == null) {
+                Toast.makeText(this, "No image to export", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            val file = File(imagePath)
+            if (!file.exists()) {
+                Toast.makeText(this, "Image file not found", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            // Save to gallery
+            val success = saveToGallery(file)
+            if (success) {
+                Toast.makeText(this, "Image saved to Gallery ✓", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "Failed to save image", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Export failed", e)
+            Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun saveToGallery(file: File): Boolean {
+        return try {
+            val context = this
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+ (API 29+)
+                val resolver = context.contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "Vigil_${System.currentTimeMillis()}.jpg")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Vigil")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri).use { outputStream ->
+                        file.inputStream().use { inputStream ->
+                            inputStream.copyTo(outputStream!!)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                    true
+                } else {
+                    false
+                }
+            } else {
+                // Android 9 and below
+                @Suppress("DEPRECATION")
+                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val vigilDir = File(picturesDir, "Vigil")
+                if (!vigilDir.exists()) {
+                    vigilDir.mkdirs()
+                }
+                
+                val destFile = File(vigilDir, "Vigil_${System.currentTimeMillis()}.jpg")
+                file.copyTo(destFile, overwrite = true)
+                
+                // Notify media scanner
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(destFile.absolutePath),
+                    null,
+                    null
+                )
+                true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Save to gallery failed", e)
+            false
+        }
+    }
+
+    private fun shareImage(log: DetectionLog) {
+        try {
+            val imagePath = log.imagePath ?: log.thumbnailPath
+            if (imagePath == null) {
+                Toast.makeText(this, "No image to share", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            val file = File(imagePath)
+            if (!file.exists()) {
+                Toast.makeText(this, "Image file not found", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            val uri = FileProvider.getUriForFile(
+                this,
+                "${packageName}.fileprovider",
+                file
+            )
+            
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            
+            startActivity(Intent.createChooser(shareIntent, "Share Detection Image"))
+        } catch (e: Exception) {
+            Log.e(TAG, "Share failed", e)
+            Toast.makeText(this, "Share failed: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 }

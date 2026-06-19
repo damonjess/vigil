@@ -242,6 +242,11 @@ class DetectionStorage(private val context: Context) {
         return "Total: $total | People: $persons | Vehicles: $vehicles | Last Hour: $lastHour"
     }
 
+    fun exportToGallery(log: DetectionLog): Boolean {
+        val path = log.imagePath ?: return false
+        return saveToGallery(context, path)
+    }
+
     fun saveToGallery(context: Context, imagePath: String): Boolean {
         return try {
             val isPng = imagePath.endsWith(".png", ignoreCase = true)
