@@ -16,7 +16,19 @@ data class Detection(
     val label: String,
     val classId: Int,
     val confidence: Float,
-    val bounds: RectF // normalized 0..1
+    val bounds: RectF,
+    val speedInfo: SpeedInfo = SpeedInfo(),
+    var personId: String = "",
+    var plateText: String = ""
+)
+
+data class SpeedInfo(
+    val speedPxPerSec: Float = 0f,
+    val speedMs: Float = 0f,
+    val speedKmh: Float = 0f,
+    val speedMph: Float = 0f,
+    val speedMphDisplay: Int = 0,
+    val direction: String = "stationary"
 )
 
 class Yolov8Detector(context: Context) {
@@ -30,10 +42,12 @@ class Yolov8Detector(context: Context) {
         private const val IOU_THRESHOLD = 0.45f
         private val PERSON = 0
         private val VEHICLES = setOf(1, 2, 3, 5, 7)
-        private val RELEVANT = VEHICLES + PERSON
     }
 
+    var relevantClasses: Set<Int> = VEHICLES + PERSON
+
     private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
     private val labels: List<String> = context.assets.open("labelmap.txt")
         .bufferedReader().readLines().filter { it.isNotBlank() }
 
@@ -51,11 +65,21 @@ class Yolov8Detector(context: Context) {
     var peakRelevantLabel: String = "none"
         private set
 
-    private var gpuDelegate: GpuDelegate? = null
+    // Speed tracking
+    private val positionHistory = mutableMapOf<Int, MutableList<Pair<Float, Float>>>()
+    private val timestampHistory = mutableMapOf<Int, MutableList<Long>>()
+    private val MAX_HISTORY = 5
+    private var frameWidth = 0
+    private var frameHeight = 0
 
     fun resetPeak() {
         peakRelevantScore = 0f
         peakRelevantLabel = "none"
+    }
+
+    fun clearHistory() {
+        positionHistory.clear()
+        timestampHistory.clear()
     }
 
     init {
@@ -64,29 +88,24 @@ class Yolov8Detector(context: Context) {
             val buffer: MappedByteBuffer = FileInputStream(afd.fileDescriptor).channel
                 .map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
             
-            // SAFE GPU initialization with try-catch
-            try {
-                gpuDelegate = GpuDelegate()
-                Log.d(TAG, "GPU delegate initialized successfully")
-            } catch (e: Exception) {
-                Log.w(TAG, "GPU delegate not available, falling back to CPU: ${e.message}")
-                gpuDelegate = null
-            }
-            
-            val options = Interpreter.Options().apply { 
-                setNumThreads(4)
-                // Only add GPU delegate if it was successfully created
-                gpuDelegate?.let { 
-                    addDelegate(it)
-                    Log.d(TAG, "GPU acceleration enabled")
+            val options = Interpreter.Options().apply {
+                try {
+                    gpuDelegate = GpuDelegate()
+                    addDelegate(gpuDelegate)
+                    setNumThreads(1) // GPU coordination
+                    Log.d(TAG, "GPU delegate enabled")
+                } catch (e: Exception) {
+                    Log.w(TAG, "GPU delegate failed, using CPU", e)
+                    setNumThreads(4)
                 }
             }
+            
             interpreter = Interpreter(buffer, options)
-            Log.d(TAG, "YOLOv8 detector initialized successfully")
+            Log.d(TAG, "YOLOv8 detector initialized")
             
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
-            Log.e(TAG, "Failed to initialize YOLOv8 detector", e)
+            Log.e(TAG, "Initialization failed", e)
         }
     }
 
@@ -94,11 +113,16 @@ class Yolov8Detector(context: Context) {
 
     fun detect(bitmap: Bitmap): List<Detection> {
         val engine = interpreter ?: return emptyList()
+        val startTime = System.currentTimeMillis()
         try {
             val input = preprocess(bitmap)
             val output = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(NUM_BOXES) } }
             engine.run(input, output)
-            return decode(output[0])
+            val results = decode(output[0], bitmap.width, bitmap.height)
+            
+            PerformanceMonitor.recordInferenceTime(System.currentTimeMillis() - startTime)
+            
+            return results
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
             Log.e(TAG, "Detection failed", e)
@@ -124,7 +148,10 @@ class Yolov8Detector(context: Context) {
 
     private data class RawBox(val cx: Float, val cy: Float, val w: Float, val h: Float, val classId: Int, val conf: Float)
 
-    private fun decode(output: Array<FloatArray>): List<Detection> {
+    private fun decode(output: Array<FloatArray>, imgWidth: Int, imgHeight: Int): List<Detection> {
+        this.frameWidth = imgWidth
+        this.frameHeight = imgHeight
+
         val candidates = mutableListOf<RawBox>()
         var rawBest = 0f
         var rawBestClass = -1
@@ -138,12 +165,12 @@ class Yolov8Detector(context: Context) {
             }
             if (bestScore > rawBest) { rawBest = bestScore; rawBestClass = bestClass }
 
-            if (bestClass in RELEVANT && bestScore > peakRelevantScore) {
+            if (bestClass in relevantClasses && bestScore > peakRelevantScore) {
                 peakRelevantScore = bestScore
                 peakRelevantLabel = labels.getOrElse(bestClass) { "?" }
             }
 
-            if (bestScore >= CONF_THRESHOLD && bestClass in RELEVANT) {
+            if (bestScore >= CONF_THRESHOLD && bestClass in relevantClasses) {
                 candidates.add(RawBox(output[0][i], output[1][i], output[2][i], output[3][i], bestClass, bestScore))
             }
         }
@@ -152,7 +179,7 @@ class Yolov8Detector(context: Context) {
         lastRawMaxLabel = labels.getOrElse(rawBestClass) { "none" }
 
         val finalBoxes = mutableListOf<RawBox>()
-        for (cls in RELEVANT) {
+        for (cls in relevantClasses) {
             val boxes = candidates.filter { it.classId == cls }.sortedByDescending { it.conf }.toMutableList()
             while (boxes.isNotEmpty()) {
                 val best = boxes.removeAt(0)
@@ -161,19 +188,78 @@ class Yolov8Detector(context: Context) {
             }
         }
 
-        return finalBoxes.map {
-            Detection(
-                label = labels.getOrElse(it.classId) { "?" },
-                classId = it.classId,
-                confidence = it.conf,
-                bounds = RectF(
-                    (it.cx - it.w / 2f).coerceIn(0f, 1f),
-                    (it.cy - it.h / 2f).coerceIn(0f, 1f),
-                    (it.cx + it.w / 2f).coerceIn(0f, 1f),
-                    (it.cy + it.h / 2f).coerceIn(0f, 1f)
-                )
+        return finalBoxes.map { raw ->
+            val bounds = RectF(
+                (raw.cx - raw.w / 2f).coerceIn(0f, 1f),
+                (raw.cy - raw.h / 2f).coerceIn(0f, 1f),
+                (raw.cx + raw.w / 2f).coerceIn(0f, 1f),
+                (raw.cy + raw.h / 2f).coerceIn(0f, 1f)
             )
+            
+            val detection = Detection(
+                label = labels.getOrElse(raw.classId) { "?" },
+                classId = raw.classId,
+                confidence = raw.conf,
+                bounds = bounds,
+                speedInfo = SpeedInfo()
+            )
+            
+            val speedInfo = calculateSpeed(detection)
+            detection.copy(speedInfo = speedInfo)
         }
+    }
+
+    fun calculateSpeed(detection: Detection): SpeedInfo {
+        val key = detection.classId * 1000 + (detection.bounds.centerX() * 100).toInt()
+        val centerX = detection.bounds.centerX()
+        val centerY = detection.bounds.centerY()
+        val now = System.currentTimeMillis()
+        
+        val positions = positionHistory.getOrPut(key) { mutableListOf() }
+        val timestamps = timestampHistory.getOrPut(key) { mutableListOf() }
+        
+        positions.add(centerX to centerY)
+        timestamps.add(now)
+        
+        if (positions.size > MAX_HISTORY) {
+            positions.removeAt(0)
+            timestamps.removeAt(0)
+        }
+        
+        var speedPxPerSec = 0f
+        var direction = "stationary"
+        
+        if (positions.size >= 2) {
+            val dx = positions.last().first - positions.first().first
+            val dy = positions.last().second - positions.first().second
+            val dt = (timestamps.last() - timestamps.first()) / 1000f
+            
+            if (dt > 0.1f) {
+                speedPxPerSec = kotlin.math.sqrt(dx*dx + dy*dy) / dt
+                
+                direction = when {
+                    kotlin.math.abs(dx) > kotlin.math.abs(dy) -> {
+                        if (dx > 0) "→ Right" else "← Left"
+                    }
+                    dy < 0 -> "↑ Up"
+                    dy > 0 -> "↓ Down"
+                    else -> "stationary"
+                }
+            }
+        }
+        
+        val speedMs = speedPxPerSec * 0.3f
+        val speedKmh = speedMs * 3.6f
+        val speedMph = speedMs * 2.23694f
+        
+        return SpeedInfo(
+            speedPxPerSec = speedPxPerSec,
+            speedMs = speedMs,
+            speedKmh = speedKmh,
+            speedMph = speedMph,
+            speedMphDisplay = speedMph.toInt(),
+            direction = direction
+        )
     }
 
     private fun iou(a: RawBox, b: RawBox): Float {
@@ -188,12 +274,6 @@ class Yolov8Detector(context: Context) {
 
     fun close() {
         interpreter?.close()
-        interpreter = null
-        try {
-            gpuDelegate?.close()
-            gpuDelegate = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Error closing GPU delegate", e)
-        }
+        gpuDelegate?.close()
     }
 }

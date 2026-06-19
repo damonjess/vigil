@@ -1,6 +1,5 @@
 package com.example.vigil.data
 
-import android.graphics.Bitmap
 import android.graphics.RectF
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -16,7 +15,11 @@ data class DetectionLog(
     val imagePath: String? = null,
     val thumbnailPath: String? = null,
     val isPerson: Boolean = false,
-    val isVehicle: Boolean = false
+    val isVehicle: Boolean = false,
+    val speedMph: Int = 0,
+    val direction: String = "",
+    val personId: String = "",
+    val plateText: String = ""
 ) {
     val timestampFormatted: String
         get() = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(timestamp))
@@ -24,11 +27,3 @@ data class DetectionLog(
     val timeOnly: String
         get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
 }
-
-data class DetectionSession(
-    val id: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date()),
-    val startTime: Long = System.currentTimeMillis(),
-    var detectionCount: Int = 0,
-    var personCount: Int = 0,
-    var vehicleCount: Int = 0
-)
