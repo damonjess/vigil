@@ -1,3 +1,90 @@
+VIGIL PROJECT FULL SOURCE CODE
+
+=========================================
+FILE: app/build.gradle.kts
+=========================================
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
+}
+
+android {
+    namespace = "com.example.vigil"
+    compileSdk = 37
+
+    defaultConfig {
+        applicationId = "com.example.vigil"
+        minSdk = 26
+        targetSdk = 36
+        versionCode = 1
+        versionName = "1.0"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            optimization {
+                enable = false
+            }
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+    buildFeatures {
+        compose = true
+    }
+    androidResources {
+        noCompress += "tflite"
+    }
+}
+
+dependencies {
+    val cameraxVersion = "1.4.1"
+
+    // CameraX
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+    implementation("androidx.camera:camera-extensions:$cameraxVersion")
+
+    // TensorFlow Lite - FIXED with proper GPU support
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
+
+    // Compose
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+
+    // Permissions
+    implementation("com.google.accompanist:accompanist-permissions:0.35.0-alpha")
+
+    // Missing dependencies required by MainActivity/DetectionStorage
+    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.google.code.gson:gson:2.11.0")
+    implementation("androidx.compose.material:material-icons-extended")
+
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.material)
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(libs.androidx.junit)
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/MainActivity.kt
+=========================================
 package com.example.vigil
 
 import android.Manifest
@@ -24,6 +111,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -134,16 +223,11 @@ class MainActivity : ComponentActivity() {
         val context = LocalContext.current
         val lifecycleOwner = LocalLifecycleOwner.current
         val scope = rememberCoroutineScope()
-        
+
         val detector = remember { Yolov8Detector(context) }
         val storage = remember { DetectionStorage(context) }
         val reId = remember { PersonReId() }
-        val plateReader = remember { PlateOcrReader() }
-        
-        DisposableEffect(plateReader) {
-            onDispose { plateReader.close() }
-        }
-        
+
         var statusText by remember { mutableStateOf("Loading model...") }
         var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
         var recentLogs by remember { mutableStateOf<List<DetectionLog>>(emptyList()) }
@@ -209,7 +293,7 @@ class MainActivity : ComponentActivity() {
                                     if (currentTime - lastFrameTime >= FRAME_INTERVAL_MS) {
                                         lastFrameTime = currentTime
                                         frameCount++
-                                        
+
                                         if (currentTime - lastFpsUpdate >= 1000) {
                                             currentFps = frameCount
                                             frameCount = 0
@@ -220,7 +304,7 @@ class MainActivity : ComponentActivity() {
                                         if (!isProcessing && modelReady) {
                                             isProcessing = true
                                             val bitmap = imageProxy.toBitmap()
-                                            
+
                                             if (bitmap != null) {
                                                 scope.launch {
                                                     try {
@@ -229,12 +313,12 @@ class MainActivity : ComponentActivity() {
                                                             detector.detect(bitmap)
                                                         }
                                                         detections = results
-                                                        
+
                                                         // Person detection with Re-ID and throttling
                                                         val bestPerson = results
                                                             .filter { it.classId == 0 && it.confidence > PERSON_CONFIDENCE_THRESHOLD }
                                                             .maxByOrNull { it.confidence }
-                                                        
+
                                                         if (bestPerson != null && currentTime - lastPersonTimestamp > 3000) {
                                                             val area = bestPerson.bounds.width() * bestPerson.bounds.height()
                                                             if (area > MIN_PERSON_AREA) {
@@ -243,7 +327,7 @@ class MainActivity : ComponentActivity() {
                                                                     if (cropped != null && !cropped.isRecycled) {
                                                                         // Re-identify person
                                                                         val reIdResult = reId.identifyPerson(bitmap, bestPerson)
-                                                                        
+
                                                                         withContext(Dispatchers.IO) {
                                                                             storage.saveDetection(
                                                                                 detection = bestPerson,
@@ -252,10 +336,10 @@ class MainActivity : ComponentActivity() {
                                                                                 personId = reIdResult.personId
                                                                             )
                                                                         }
-                                                                        
+
                                                                         // Safe recycle: check if it's a new instance
                                                                         if (cropped != bitmap) cropped.recycle()
-                                                                        
+
                                                                         personDetectionCount++
                                                                         lastPersonTimestamp = currentTime
                                                                         recentLogs = storage.getRecentLogs(20)
@@ -265,43 +349,32 @@ class MainActivity : ComponentActivity() {
                                                                 }
                                                             }
                                                         }
-                                                        
-                                                        // Vehicle handling: plate OCR + logging, throttled by time
-                                                        // (not speed — speed calc isn't reliable without a real
-                                                        // multi-frame tracker yet, see earlier notes)
-                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) }
-                                                        val bestVehicle = vehicles.maxByOrNull { it.confidence }
-                                                        if (bestVehicle != null && currentTime - lastVehicleTimestamp > 4000) {
-                                                            val cropped = cropDetection(bitmap, bestVehicle.bounds)
-                                                            if (cropped != null && !cropped.isRecycled) {
-                                                                val plateText = try {
-                                                                    plateReader.readPlate(bitmap, bestVehicle.bounds)
-                                                                } catch (e: Exception) {
-                                                                    Log.e(TAG, "Plate OCR failed", e)
-                                                                    null
-                                                                }
-                                                                val vehicleWithPlate = bestVehicle.copy(
-                                                                    plateText = plateText ?: ""
-                                                                )
 
-                                                                withContext(Dispatchers.IO) {
-                                                                    storage.saveDetection(
-                                                                        detection = vehicleWithPlate,
-                                                                        originalBitmap = bitmap,
-                                                                        zoomedBitmap = cropped,
-                                                                        speedMph = bestVehicle.speedInfo.speedMphDisplay,
-                                                                        direction = bestVehicle.speedInfo.direction,
-                                                                        plateText = plateText ?: ""
-                                                                    )
+                                                        // Vehicle speed tracking with throttling
+                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) }
+                                                        vehicles.forEach { vehicle ->
+                                                            if (vehicle.speedInfo.speedMph > 5f && currentTime - lastVehicleTimestamp > 5000) {
+                                                                // Save vehicle with speed
+                                                                val cropped = cropDetection(bitmap, vehicle.bounds)
+                                                                if (cropped != null && !cropped.isRecycled) {
+                                                                    withContext(Dispatchers.IO) {
+                                                                        storage.saveDetection(
+                                                                            detection = vehicle,
+                                                                            originalBitmap = bitmap,
+                                                                            zoomedBitmap = cropped,
+                                                                            speedMph = vehicle.speedInfo.speedMphDisplay,
+                                                                            direction = vehicle.speedInfo.direction
+                                                                        )
+                                                                    }
+                                                                    if (cropped != bitmap) cropped.recycle()
+                                                                    lastVehicleTimestamp = currentTime
+                                                                    recentLogs = storage.getRecentLogs(20)
                                                                 }
-                                                                if (cropped != bitmap) cropped.recycle()
-                                                                lastVehicleTimestamp = currentTime
-                                                                recentLogs = storage.getRecentLogs(20)
                                                             }
                                                         }
-                                                        
+
                                                         statusText = "Detections: ${results.size} | ${detector.peakRelevantLabel} ${(detector.peakRelevantScore * 100).toInt()}%"
-                                                        
+
                                                     } catch (e: Exception) {
                                                         Log.e(TAG, "Detection error", e)
                                                     } finally {
@@ -337,7 +410,7 @@ class MainActivity : ComponentActivity() {
 
                     val isPerson = det.classId == 0
                     val isVehicle = det.classId in setOf(1, 2, 3, 5, 7)
-                    
+
                     val color = when {
                         isPerson -> Color(0xFF00FF41)
                         isVehicle -> Color(0xFFFF6B00)
@@ -362,7 +435,7 @@ class MainActivity : ComponentActivity() {
 
                     val cornerSize = 20f
                     val accentStroke = 3f
-                    
+
                     drawLine(color, Offset(left + 4f, top + cornerSize), Offset(left + 4f, top + 4f), accentStroke)
                     drawLine(color, Offset(left + 4f, top + 4f), Offset(left + cornerSize, top + 4f), accentStroke)
                     drawLine(color, Offset(right - 4f, top + cornerSize), Offset(right - 4f, top + 4f), accentStroke)
@@ -376,7 +449,7 @@ class MainActivity : ComponentActivity() {
                     val confidenceText = "${(det.confidence * 100).toInt()}%"
                     val labelText = if (isPerson) "👤 ${det.label}" else if (isVehicle) "🚗 ${det.label}" else det.label
                     val displayText = "$labelText $confidenceText"
-                    
+
                     drawContext.canvas.nativeCanvas.apply {
                         val paint = android.graphics.Paint().apply {
                             this.color = color.toArgb()
@@ -384,15 +457,15 @@ class MainActivity : ComponentActivity() {
                             typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
                             isAntiAlias = true
                         }
-                        
+
                         val bgPaint = android.graphics.Paint().apply {
                             this.color = android.graphics.Color.argb(200, 0, 0, 0)
                         }
-                        
+
                         val textWidth = paint.measureText(displayText)
                         val padding = 12f
                         val height = 44f
-                        
+
                         drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f, bgPaint)
                         drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f,
                             android.graphics.Paint().apply {
@@ -402,26 +475,6 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                         drawText(displayText, left + padding + 8f, top - 8f, paint)
-                    }
-
-                    // PLATE TEXT
-                    if (isVehicle && det.plateText.isNotEmpty()) {
-                        drawContext.canvas.nativeCanvas.apply {
-                            val paint = android.graphics.Paint().apply {
-                                this.color = Color(0xFF00E5FF).toArgb()
-                                textSize = 34f
-                                typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
-                                isAntiAlias = true
-                            }
-                            val bgPaint = android.graphics.Paint().apply {
-                                this.color = android.graphics.Color.argb(180, 0, 0, 0)
-                            }
-                            val text = "PLATE: ${det.plateText}"
-                            val textWidth = paint.measureText(text)
-                            val yPos = top - 50f
-                            drawRoundRect(left + 4f, yPos - 30f, left + textWidth + 20f, yPos + 8f, 8f, 8f, bgPaint)
-                            drawText(text, left + 12f, yPos, paint)
-                        }
                     }
 
                     // SPEED IN MPH
@@ -535,7 +588,7 @@ class MainActivity : ComponentActivity() {
                         HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
                         Spacer(Modifier.height(12.dp))
                     }
-                    
+
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ControlButton(
                             text = if (autoZoomActive) "🔍 ZOOM ON" else "ZOOM",
@@ -543,16 +596,16 @@ class MainActivity : ComponentActivity() {
                             color = Color(0xFF00FF41),
                             modifier = Modifier.weight(1f)
                         ) { autoZoomActive = !autoZoomActive }
-                        
+
                         ControlButton(
                             text = "📋 LOGS (${recentLogs.size})",
                             active = showLogs,
                             color = Color(0xFFFF6B00),
                             modifier = Modifier.weight(1f)
                         ) { showLogs = !showLogs }
-                        
+
                         IconButton(
-                            onClick = { 
+                            onClick = {
                                 storage.clearLogs()
                                 reId.clear()
                                 detector.clearHistory()
@@ -661,19 +714,19 @@ class MainActivity : ComponentActivity() {
             val bw = bitmap.width
             val bh = bitmap.height
             if (bw <= 0 || bh <= 0) return null
-            
+
             val paddingX = (bounds.width() * bw * 0.3f).toInt().coerceAtLeast(20)
             val paddingY = (bounds.height() * bh * 0.3f).toInt().coerceAtLeast(20)
-            
+
             val left = ((bounds.left * bw) - paddingX).toInt().coerceAtLeast(0)
             val top = ((bounds.top * bh) - paddingY).toInt().coerceAtLeast(0)
             val right = ((bounds.right * bw) + paddingX).toInt().coerceAtMost(bw)
             val bottom = ((bounds.bottom * bh) + paddingY).toInt().coerceAtMost(bh)
-            
+
             val width = right - left
             val height = bottom - top
             if (width < 20 || height < 20) return null
-            
+
             Bitmap.createBitmap(bitmap, left, top, width, height)
         } catch (e: Exception) {
             Log.e(TAG, "Error in cropDetection", e)
@@ -776,9 +829,9 @@ class MainActivity : ComponentActivity() {
                         Text(if (log.isPerson) "👤" else "🚗", fontSize = 24.sp)
                     }
                 }
-                
+
                 Spacer(modifier = Modifier.width(12.dp))
-                
+
                 // Details Column
                 Column(modifier = Modifier.weight(1f)) {
                     Row(
@@ -799,14 +852,14 @@ class MainActivity : ComponentActivity() {
                             fontFamily = FontFamily.Monospace
                         )
                     }
-                    
+
                     Text(
                         log.timeOnly,
                         color = Color.Gray,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace
                     )
-                    
+
                     if (log.isVehicle && log.speedMph > 0) {
                         Text(
                             "🚗 ${log.speedMph} MPH ${log.direction}",
@@ -816,7 +869,7 @@ class MainActivity : ComponentActivity() {
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    
+
                     if (log.isPerson && log.personId.isNotEmpty()) {
                         Text(
                             "👤 ${log.personId}",
@@ -827,7 +880,7 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
-                
+
                 // EXPORT / SAVE BUTTON - FIXED
                 IconButton(
                     onClick = { onExport(log) },
@@ -853,4 +906,928 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/Yolov8Detector.kt
+=========================================
+package com.example.vigil
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.RectF
+import android.util.Log
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.GpuDelegate
+import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
+
+data class Detection(
+    val label: String,
+    val classId: Int,
+    val confidence: Float,
+    val bounds: RectF,
+    val speedInfo: SpeedInfo = SpeedInfo(),
+    var personId: String = "",
+    var plateText: String = ""
+)
+
+data class SpeedInfo(
+    val speedPxPerSec: Float = 0f,
+    val speedMs: Float = 0f,
+    val speedKmh: Float = 0f,
+    val speedMph: Float = 0f,
+    val speedMphDisplay: Int = 0,
+    val direction: String = "stationary"
+)
+
+class Yolov8Detector(context: Context) {
+    companion object {
+        private const val TAG = "Yolov8Detector"
+        private const val MODEL_PATH = "models/yolov8n_float32.tflite"
+        private const val INPUT_SIZE = 640
+        private const val NUM_CLASSES = 80
+        private const val NUM_BOXES = 8400
+        private const val CONF_THRESHOLD = 0.25f
+        private const val IOU_THRESHOLD = 0.45f
+        private val PERSON = 0
+        private val VEHICLES = setOf(1, 2, 3, 5, 7)
+    }
+
+    var relevantClasses: Set<Int> = VEHICLES + PERSON
+
+    private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
+    private val labels: List<String> = context.assets.open("labelmap.txt")
+        .bufferedReader().readLines().filter { it.isNotBlank() }
+
+    // Diagnostics
+    var lastRawMaxScore: Float = 0f
+        private set
+    var lastRawMaxLabel: String = "none"
+        private set
+    var lastError: String? = null
+        private set
+
+    // Session peak
+    var peakRelevantScore: Float = 0f
+        private set
+    var peakRelevantLabel: String = "none"
+        private set
+
+    // Speed tracking
+    private val positionHistory = mutableMapOf<Int, MutableList<Pair<Float, Float>>>()
+    private val timestampHistory = mutableMapOf<Int, MutableList<Long>>()
+    private val MAX_HISTORY = 5
+    private var frameWidth = 0
+    private var frameHeight = 0
+
+    fun resetPeak() {
+        peakRelevantScore = 0f
+        peakRelevantLabel = "none"
+    }
+
+    fun clearHistory() {
+        positionHistory.clear()
+        timestampHistory.clear()
+    }
+
+    init {
+        try {
+            val afd = context.assets.openFd(MODEL_PATH)
+            val buffer: MappedByteBuffer = FileInputStream(afd.fileDescriptor).channel
+                .map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+
+            val options = Interpreter.Options().apply {
+                try {
+                    gpuDelegate = GpuDelegate()
+                    addDelegate(gpuDelegate)
+                    setNumThreads(1) // GPU coordination
+                    Log.d(TAG, "GPU delegate enabled")
+                } catch (e: Exception) {
+                    Log.w(TAG, "GPU delegate failed, using CPU", e)
+                    setNumThreads(4)
+                }
+            }
+
+            interpreter = Interpreter(buffer, options)
+            Log.d(TAG, "YOLOv8 detector initialized")
+
+        } catch (e: Exception) {
+            lastError = "${e::class.simpleName}: ${e.message}"
+            Log.e(TAG, "Initialization failed", e)
+        }
+    }
+
+    fun isReady() = interpreter != null
+
+    fun detect(bitmap: Bitmap): List<Detection> {
+        val engine = interpreter ?: return emptyList()
+        val startTime = System.currentTimeMillis()
+        try {
+            val input = preprocess(bitmap)
+            val output = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(NUM_BOXES) } }
+            engine.run(input, output)
+            val results = decode(output[0], bitmap.width, bitmap.height)
+
+            PerformanceMonitor.recordInferenceTime(System.currentTimeMillis() - startTime)
+
+            return results
+        } catch (e: Exception) {
+            lastError = "${e::class.simpleName}: ${e.message}"
+            Log.e(TAG, "Detection failed", e)
+            return emptyList()
+        }
+    }
+
+    private fun preprocess(bitmap: Bitmap): ByteBuffer {
+        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
+        val buffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
+        buffer.order(ByteOrder.nativeOrder())
+        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
+        resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        for (p in pixels) {
+            buffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
+            buffer.putFloat(((p shr 8) and 0xFF) / 255.0f)
+            buffer.putFloat((p and 0xFF) / 255.0f)
+        }
+        buffer.rewind()
+        if (resized !== bitmap) resized.recycle()
+        return buffer
+    }
+
+    private fun decode(output: Array<FloatArray>, imgWidth: Int, imgHeight: Int): List<Detection> {
+        this.frameWidth = imgWidth
+        this.frameHeight = imgHeight
+
+        val candidates = mutableListOf<RawBox>()
+        var rawBest = 0f
+        var rawBestClass = -1
+
+        for (i in 0 until NUM_BOXES) {
+            var bestClass = -1
+            var bestScore = 0f
+            for (c in 0 until NUM_CLASSES) {
+                val s = output[4 + c][i]
+                if (s > bestScore) { bestScore = s; bestClass = c }
+            }
+            if (bestScore > rawBest) { rawBest = bestScore; rawBestClass = bestClass }
+
+            if (bestClass in relevantClasses && bestScore > peakRelevantScore) {
+                peakRelevantScore = bestScore
+                peakRelevantLabel = labels.getOrElse(bestClass) { "?" }
+            }
+
+            if (bestScore >= CONF_THRESHOLD && bestClass in relevantClasses) {
+                candidates.add(RawBox(output[0][i], output[1][i], output[2][i], output[3][i], bestClass, bestScore))
+            }
+        }
+
+        lastRawMaxScore = rawBest
+        lastRawMaxLabel = labels.getOrElse(rawBestClass) { "none" }
+
+        val finalBoxes = mutableListOf<RawBox>()
+        for (cls in relevantClasses) {
+            val boxes = candidates.filter { it.classId == cls }.sortedByDescending { it.conf }.toMutableList()
+            while (boxes.isNotEmpty()) {
+                val best = boxes.removeAt(0)
+                finalBoxes.add(best)
+                boxes.removeAll { iou(best, it) > IOU_THRESHOLD }
+            }
+        }
+
+        return finalBoxes.map { raw ->
+            val bounds = RectF(
+                (raw.cx - raw.w / 2f).coerceIn(0f, 1f),
+                (raw.cy - raw.h / 2f).coerceIn(0f, 1f),
+                (raw.cx + raw.w / 2f).coerceIn(0f, 1f),
+                (raw.cy + raw.h / 2f).coerceIn(0f, 1f)
+            )
+
+            val detection = Detection(
+                label = labels.getOrElse(raw.classId) { "?" },
+                classId = raw.classId,
+                confidence = raw.conf,
+                bounds = bounds,
+                speedInfo = SpeedInfo()
+            )
+
+            val speedInfo = calculateSpeed(detection)
+            detection.copy(speedInfo = speedInfo)
+        }
+    }
+
+    private data class RawBox(val cx: Float, val cy: Float, val w: Float, val h: Float, val classId: Int, val conf: Float)
+
+    fun calculateSpeed(detection: Detection): SpeedInfo {
+        val key = detection.classId * 1000 + (detection.bounds.centerX() * 100).toInt()
+        val centerX = detection.bounds.centerX()
+        val centerY = detection.bounds.centerY()
+        val now = System.currentTimeMillis()
+
+        val positions = positionHistory.getOrPut(key) { mutableListOf() }
+        val timestamps = timestampHistory.getOrPut(key) { mutableListOf() }
+
+        positions.add(centerX to centerY)
+        timestamps.add(now)
+
+        if (positions.size > MAX_HISTORY) {
+            positions.removeAt(0)
+            timestamps.removeAt(0)
+        }
+
+        var speedPxPerSec = 0f
+        var direction = "stationary"
+
+        if (positions.size >= 2) {
+            val dx = positions.last().first - positions.first().first
+            val dy = positions.last().second - positions.first().second
+            val dt = (timestamps.last() - timestamps.first()) / 1000f
+
+            if (dt > 0.1f) {
+                speedPxPerSec = kotlin.math.sqrt(dx*dx + dy*dy) / dt
+
+                direction = when {
+                    kotlin.math.abs(dx) > kotlin.math.abs(dy) -> {
+                        if (dx > 0) "→ Right" else "← Left"
+                    }
+                    dy < 0 -> "↑ Up"
+                    dy > 0 -> "↓ Down"
+                    else -> "stationary"
+                }
+            }
+        }
+
+        val speedMs = speedPxPerSec * 0.3f
+        val speedKmh = speedMs * 3.6f
+        val speedMph = speedMs * 2.23694f
+
+        return SpeedInfo(
+            speedPxPerSec = speedPxPerSec,
+            speedMs = speedMs,
+            speedKmh = speedKmh,
+            speedMph = speedMph,
+            speedMphDisplay = speedMph.toInt(),
+            direction = direction
+        )
+    }
+
+    private fun iou(a: RawBox, b: RawBox): Float {
+        val ax1 = a.cx - a.w/2f; val ay1 = a.cy - a.h/2f; val ax2 = a.cx + a.w/2f; val ay2 = a.cy + a.h/2f
+        val bx1 = b.cx - b.w/2f; val by1 = b.cy - b.h/2f; val bx2 = b.cx + b.w/2f; val by2 = b.cy + b.h/2f
+        val iw = (minOf(ax2, bx2) - maxOf(ax1, bx1)).coerceAtLeast(0f)
+        val ih = (minOf(ay2, by2) - maxOf(ay1, by1)).coerceAtLeast(0f)
+        val inter = iw * ih
+        val union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter
+        return if (union <= 0f) 0f else inter / union
+    }
+
+    fun close() {
+        interpreter?.close()
+        gpuDelegate?.close()
+    }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/DetectionStorage.kt
+=========================================
+package com.example.vigil
+
+import android.content.ContentValues
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
+import com.example.vigil.data.DetectionLog
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+class DetectionStorage(private val context: Context) {
+    companion object {
+        private const val TAG = "DetectionStorage"
+        private const val LOGS_FILE = "detection_logs.json"
+        private const val MAX_LOGS = 1000
+        private const val IMAGE_QUALITY = 90
+        private const val THUMBNAIL_SIZE = 300
+    }
+
+    private val gson = Gson()
+    private val imagesDir: File by lazy {
+        File(context.filesDir, "detection_images").apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    private val thumbnailsDir: File by lazy {
+        File(context.filesDir, "detection_thumbnails").apply {
+            if (!exists()) mkdirs()
+        }
+    }
+
+    private val logsFile: File by lazy {
+        File(context.filesDir, LOGS_FILE)
+    }
+
+    private var cachedLogs: List<DetectionLog> = emptyList()
+
+    init {
+        loadLogs()
+    }
+
+    private fun loadLogs() {
+        try {
+            if (logsFile.exists()) {
+                val json = logsFile.readText()
+                val type = object : TypeToken<List<DetectionLog>>() {}.type
+                cachedLogs = gson.fromJson(json, type) ?: emptyList()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load logs", e)
+            cachedLogs = emptyList()
+        }
+    }
+
+    suspend fun saveDetection(
+        detection: Detection,
+        originalBitmap: Bitmap? = null,
+        zoomedBitmap: Bitmap? = null,
+        speedMph: Int = 0,
+        direction: String = "",
+        personId: String = "",
+        plateText: String = ""
+    ): DetectionLog? = withContext(Dispatchers.IO) {
+        try {
+            val timestamp = System.currentTimeMillis()
+            val isPerson = detection.classId == 0
+            val isVehicle = detection.classId in setOf(1, 2, 3, 5, 7)
+
+            var imagePath: String? = null
+            var thumbnailPath: String? = null
+
+            val imageToSave = zoomedBitmap ?: originalBitmap
+
+            if (imageToSave != null && !imageToSave.isRecycled && imageToSave.width > 10 && imageToSave.height > 10) {
+                try {
+                    imagePath = saveImage(imageToSave, "detection_${timestamp}")
+
+                    val thumbnail = createThumbnail(imageToSave, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+                    if (thumbnail != null && !thumbnail.isRecycled) {
+                        thumbnailPath = saveImage(thumbnail, "thumb_${timestamp}")
+                        thumbnail.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to save images", e)
+                }
+            }
+
+            val log = DetectionLog(
+                id = timestamp,
+                label = detection.label,
+                classId = detection.classId,
+                confidence = detection.confidence,
+                boundingBox = detection.bounds,
+                timestamp = timestamp,
+                imagePath = imagePath,
+                thumbnailPath = thumbnailPath,
+                isPerson = isPerson,
+                isVehicle = isVehicle,
+                speedMph = speedMph,
+                direction = direction,
+                personId = personId,
+                plateText = plateText
+            )
+
+            cachedLogs = (listOf(log) + cachedLogs).take(MAX_LOGS)
+            saveLogs()
+
+            Log.d(TAG, "Saved detection: ${log.label} at ${log.timestampFormatted}")
+            log
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save detection", e)
+            null
+        }
+    }
+
+    private fun saveImage(bitmap: Bitmap, name: String): String? {
+        return try {
+            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+                return null
+            }
+            val file = File(imagesDir, "$name.jpg")
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, IMAGE_QUALITY, out)
+            }
+            file.absolutePath
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save image", e)
+            null
+        }
+    }
+
+    private fun createThumbnail(bitmap: Bitmap, maxWidth: Int, maxHeight: Int): Bitmap? {
+        return try {
+            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+                return null
+            }
+            val scale = minOf(
+                maxWidth.toFloat() / bitmap.width,
+                maxHeight.toFloat() / bitmap.height,
+                1f
+            )
+            if (scale >= 1f) {
+                bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            } else {
+                val newWidth = (bitmap.width * scale).toInt()
+                val newHeight = (bitmap.height * scale).toInt()
+                Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create thumbnail", e)
+            null
+        }
+    }
+
+    private fun saveLogs() {
+        try {
+            val json = gson.toJson(cachedLogs)
+            logsFile.writeText(json)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save logs", e)
+        }
+    }
+
+    fun getLogs(): List<DetectionLog> = cachedLogs
+    fun getPersonLogs(): List<DetectionLog> = cachedLogs.filter { it.isPerson }
+    fun getVehicleLogs(): List<DetectionLog> = cachedLogs.filter { it.isVehicle }
+    fun getRecentLogs(count: Int = 50): List<DetectionLog> = cachedLogs.take(count)
+
+    fun clearLogs() {
+        cachedLogs = emptyList()
+        saveLogs()
+        imagesDir.listFiles()?.forEach { it.delete() }
+        thumbnailsDir.listFiles()?.forEach { it.delete() }
+    }
+
+    fun getDetectionStats(): String {
+        val total = cachedLogs.size
+        val persons = cachedLogs.count { it.isPerson }
+        val vehicles = cachedLogs.count { it.isVehicle }
+        val lastHour = cachedLogs.count {
+            System.currentTimeMillis() - it.timestamp < 3600000
+        }
+        return "Total: $total | People: $persons | Vehicles: $vehicles | Last Hour: $lastHour"
+    }
+
+    suspend fun exportToGallery(log: DetectionLog): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val imagePath = log.imagePath ?: log.thumbnailPath ?: return@withContext false
+            val file = File(imagePath)
+            if (!file.exists()) return@withContext false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = context.contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, "Vigil_${System.currentTimeMillis()}.jpg")
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Vigil")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                if (uri != null) {
+                    resolver.openOutputStream(uri).use { output ->
+                        file.inputStream().use { input ->
+                            input.copyTo(output!!)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                    true
+                } else false
+            } else {
+                @Suppress("DEPRECATION")
+                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val vigilDir = File(picturesDir, "Vigil")
+                if (!vigilDir.exists()) vigilDir.mkdirs()
+                val destFile = File(vigilDir, "Vigil_${System.currentTimeMillis()}.jpg")
+                file.copyTo(destFile, overwrite = true)
+                true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Export failed", e)
+            false
+        }
+    }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/PersonReId.kt
+=========================================
+package com.example.vigil
+
+import android.graphics.Bitmap
+import android.graphics.RectF
+
+class PersonReId {
+    companion object {
+        private const val MAX_HISTORY = 10
+    }
+
+    private val personHistory = mutableMapOf<String, MutableList<PersonSignature>>()
+    private var nextId = 1
+
+    data class PersonSignature(
+        val personId: String,
+        val colorHistogram: FloatArray,
+        val boundingBox: RectF,
+        val confidence: Float
+    )
+
+    data class ReIdResult(
+        val personId: String,
+        val confidence: Float,
+        val isNewPerson: Boolean
+    )
+
+    fun identifyPerson(bitmap: Bitmap, detection: Detection): ReIdResult {
+        val histogram = extractColorHistogram(bitmap, detection.bounds)
+
+        var bestMatch = ""
+        var bestScore = 0f
+
+        personHistory.forEach { (id, signatures) ->
+            signatures.forEach { signature ->
+                val score = compareHistograms(histogram, signature.colorHistogram)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestMatch = id
+                }
+            }
+        }
+
+        val threshold = 0.7f
+        return if (bestScore > threshold && bestMatch.isNotEmpty()) {
+            val id = bestMatch
+            addPerson(id, histogram, detection)
+            ReIdResult(
+                personId = id,
+                confidence = bestScore,
+                isNewPerson = false
+            )
+        } else {
+            val id = "P${nextId++}"
+            addPerson(id, histogram, detection)
+            ReIdResult(
+                personId = id,
+                confidence = 1f,
+                isNewPerson = true
+            )
+        }
+    }
+
+    private fun extractColorHistogram(bitmap: Bitmap, bounds: RectF): FloatArray {
+        val left = (bounds.left * bitmap.width).toInt().coerceAtLeast(0)
+        val top = (bounds.top * bitmap.height).toInt().coerceAtLeast(0)
+        val right = (bounds.right * bitmap.width).toInt().coerceAtMost(bitmap.width)
+        val bottom = (bounds.bottom * bitmap.height).toInt().coerceAtMost(bitmap.height)
+
+        val width = right - left
+        val height = bottom - top
+
+        if (width <= 0 || height <= 0) return FloatArray(64)
+
+        val histogram = FloatArray(64)
+        val crop = try {
+            Bitmap.createBitmap(bitmap, left, top, width, height)
+        } catch (e: Exception) {
+            return FloatArray(64)
+        }
+
+        for (x in 0 until width step 4) {
+            for (y in 0 until height step 4) {
+                val pixel = crop.getPixel(x, y)
+                val r = ((pixel shr 16) and 0xFF) / 255f
+                val g = ((pixel shr 8) and 0xFF) / 255f
+                val b = (pixel and 0xFF) / 255f
+
+                val rBin = (r * 3.99f).toInt()
+                val gBin = (g * 3.99f).toInt()
+                val bBin = (b * 3.99f).toInt()
+
+                val index = rBin * 16 + gBin * 4 + bBin
+                histogram[index] += 1
+            }
+        }
+
+        val total = histogram.sum()
+        if (total > 0) {
+            for (i in histogram.indices) {
+                histogram[i] /= total
+            }
+        }
+
+        crop.recycle()
+        return histogram
+    }
+
+    private fun compareHistograms(a: FloatArray, b: FloatArray): Float {
+        var similarity = 0f
+        for (i in a.indices) {
+            similarity += kotlin.math.min(a[i], b[i])
+        }
+        return similarity
+    }
+
+    private fun addPerson(id: String, histogram: FloatArray, detection: Detection) {
+        val signature = PersonSignature(
+            personId = id,
+            colorHistogram = histogram,
+            boundingBox = detection.bounds,
+            confidence = detection.confidence
+        )
+
+        val history = personHistory.getOrPut(id) { mutableListOf() }
+        history.add(signature)
+        if (history.size > MAX_HISTORY) {
+            history.removeAt(0)
+        }
+    }
+
+    fun getPersonCount(): Int = personHistory.size
+    fun getPersonIds(): List<String> = personHistory.keys.toList()
+    fun clear() { personHistory.clear(); nextId = 1 }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/PlateDetector.kt
+=========================================
+package com.example.vigil
+
+import android.graphics.Bitmap
+import android.graphics.RectF
+import android.util.Log
+
+class PlateDetector {
+    companion object {
+        private const val TAG = "PlateDetector"
+        private const val MIN_PLATE_WIDTH = 50
+        private const val MIN_PLATE_HEIGHT = 20
+        private const val ASPECT_RATIO_MIN = 1.5f
+        private const val ASPECT_RATIO_MAX = 4.0f
+    }
+
+    fun detectPlates(bitmap: Bitmap, detections: List<Detection>): List<PlateDetection> {
+        val plates = mutableListOf<PlateDetection>()
+
+        detections.filter { it.classId in setOf(2, 3, 5, 7) }.forEach { vehicle ->
+            val plateCandidates = findPlateCandidates(bitmap, vehicle.bounds)
+            plates.addAll(plateCandidates)
+        }
+
+        return plates
+    }
+
+    private fun findPlateCandidates(bitmap: Bitmap, vehicleBounds: RectF): List<PlateDetection> {
+        val candidates = mutableListOf<PlateDetection>()
+
+        val plateBounds = RectF(
+            vehicleBounds.left + vehicleBounds.width() * 0.2f,
+            vehicleBounds.bottom - vehicleBounds.height() * 0.3f,
+            vehicleBounds.right - vehicleBounds.width() * 0.2f,
+            vehicleBounds.bottom - vehicleBounds.height() * 0.1f
+        )
+
+        if (plateBounds.width() * bitmap.width > MIN_PLATE_WIDTH &&
+            plateBounds.height() * bitmap.height > MIN_PLATE_HEIGHT) {
+
+            val aspectRatio = (plateBounds.width() * bitmap.width) / (plateBounds.height() * bitmap.height)
+            if (aspectRatio in ASPECT_RATIO_MIN..ASPECT_RATIO_MAX) {
+                candidates.add(
+                    PlateDetection(
+                        bounds = plateBounds,
+                        confidence = 0.7f,
+                        plateText = "SCANNING...",
+                        vehicleLabel = "Vehicle"
+                    )
+                )
+            }
+        }
+
+        return candidates
+    }
+}
+
+data class PlateDetection(
+    val bounds: RectF,
+    val confidence: Float,
+    val plateText: String,
+    val vehicleLabel: String
+)
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/data/DetectionLog.kt
+=========================================
+package com.example.vigil.data
+
+import android.graphics.RectF
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+data class DetectionLog(
+    val id: Long = System.currentTimeMillis(),
+    val label: String,
+    val classId: Int,
+    val confidence: Float,
+    val boundingBox: RectF,
+    val timestamp: Long = System.currentTimeMillis(),
+    val imagePath: String? = null,
+    val thumbnailPath: String? = null,
+    val isPerson: Boolean = false,
+    val isVehicle: Boolean = false,
+    val speedMph: Int = 0,
+    val direction: String = "",
+    val personId: String = "",
+    val plateText: String = ""
+) {
+    val timestampFormatted: String
+        get() = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(timestamp))
+
+    val timeOnly: String
+        get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/FrameAnalyzer.kt
+=========================================
+package com.example.vigil
+
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+
+class FrameAnalyzer(
+    private val onFrame: (Bitmap) -> Unit
+) : ImageAnalysis.Analyzer {
+
+    override fun analyze(image: ImageProxy) {
+        try {
+            val bitmap = image.toBitmap()
+            val rotated = if (image.imageInfo.rotationDegrees != 0) {
+                val matrix = Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }
+                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            } else {
+                bitmap
+            }
+            onFrame(rotated)
+        } finally {
+            image.close()
+        }
+    }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/ImageProxyExt.kt
+=========================================
+package com.example.vigil
+
+import android.graphics.*
+import androidx.camera.core.ImageProxy
+import java.io.ByteArrayOutputStream
+
+fun ImageProxy.toBitmap(): Bitmap? {
+    // Standard RGBA_8888 format (from ImageAnalysis output)
+    // format 1 corresponds to PixelFormat.RGBA_8888
+    if (format == 1) {
+        val buffer = planes[0].buffer
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        buffer.rewind()
+        bitmap.copyPixelsFromBuffer(buffer)
+        return bitmap
+    }
+
+    // Handle YUV_420_888 (standard CameraX format)
+    try {
+        val yBuffer = planes[0].buffer
+        val uBuffer = planes[1].buffer
+        val vBuffer = planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        yBuffer.get(nv21, 0, ySize)
+
+        val uArray = ByteArray(uSize)
+        val vArray = ByteArray(vSize)
+        uBuffer.get(uArray)
+        vBuffer.get(vArray)
+
+        for (i in 0 until uSize) {
+            nv21[ySize + i * 2] = vArray[i]
+            nv21[ySize + i * 2 + 1] = uArray[i]
+        }
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val out = ByteArrayOutputStream()
+        // Using quality 80 as requested
+        yuvImage.compressToJpeg(Rect(0, 0, width, height), 80, out)
+        val imageBytes = out.toByteArray()
+        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    } catch (e: Exception) {
+        return null
+    }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/PerformanceMonitor.kt
+=========================================
+package com.example.vigil
+
+import android.util.Log
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+object PerformanceMonitor {
+    private const val TAG = "PerfMonitor"
+
+    private val _inferenceTime = MutableStateFlow(0L)
+    val inferenceTime: StateFlow<Long> = _inferenceTime.asStateFlow()
+
+    private val _fps = MutableStateFlow(0)
+    val fps: StateFlow<Int> = _fps.asStateFlow()
+
+    private var frameCount = 0
+    private var lastFpsUpdate = 0L
+
+    fun recordInferenceTime(timeMs: Long) {
+        _inferenceTime.value = timeMs
+        if (timeMs > 100) {
+            Log.w(TAG, "Slow inference: ${timeMs}ms")
+        }
+    }
+
+    fun recordFrame() {
+        frameCount++
+        val now = System.currentTimeMillis()
+        if (now - lastFpsUpdate >= 1000) {
+            _fps.value = frameCount
+            frameCount = 0
+            lastFpsUpdate = now
+        }
+    }
+}
+
+
+=========================================
+FILE: app/src/main/java/com/example/vigil/SettingsManager.kt
+=========================================
+package com.example.vigil
+
+import android.content.Context
+import android.content.SharedPreferences
+
+class SettingsManager(context: Context) {
+    companion object {
+        private const val PREFS_NAME = "vigil_settings"
+        private const val KEY_IMAGE_QUALITY = "image_quality"
+        private const val KEY_SAVE_FULL_RES = "save_full_resolution"
+        private const val DEFAULT_QUALITY = 95
+        private const val DEFAULT_SAVE_FULL = true
+    }
+
+    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    var imageQuality: Int
+        get() = prefs.getInt(KEY_IMAGE_QUALITY, DEFAULT_QUALITY)
+        set(value) = prefs.edit().putInt(KEY_IMAGE_QUALITY, value.coerceIn(1, 100)).apply()
+
+    var saveFullResolution: Boolean
+        get() = prefs.getBoolean(KEY_SAVE_FULL_RES, DEFAULT_SAVE_FULL)
+        set(value) = prefs.edit().putBoolean(KEY_SAVE_FULL_RES, value).apply()
 }

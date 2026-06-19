@@ -50,6 +50,9 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
+
+    // OCR for license plates
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     
     // Compose
     implementation("androidx.activity:activity-compose:1.9.3")
