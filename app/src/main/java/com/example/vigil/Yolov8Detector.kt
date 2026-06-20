@@ -19,7 +19,8 @@ data class Detection(
     val bounds: RectF,
     val speedInfo: SpeedInfo = SpeedInfo(),
     var personId: String = "",
-    var plateText: String = ""
+    var plateText: String = "",
+    val trackId: Int = -1 // -1 until ObjectTracker.update() assigns a real one
 )
 
 data class SpeedInfo(
@@ -65,21 +66,9 @@ class Yolov8Detector(context: Context) {
     var peakRelevantLabel: String = "none"
         private set
 
-    // Speed tracking
-    private val positionHistory = mutableMapOf<Int, MutableList<Pair<Float, Float>>>()
-    private val timestampHistory = mutableMapOf<Int, MutableList<Long>>()
-    private val MAX_HISTORY = 5
-    private var frameWidth = 0
-    private var frameHeight = 0
-
     fun resetPeak() {
         peakRelevantScore = 0f
         peakRelevantLabel = "none"
-    }
-
-    fun clearHistory() {
-        positionHistory.clear()
-        timestampHistory.clear()
     }
 
     init {
@@ -118,10 +107,8 @@ class Yolov8Detector(context: Context) {
             val input = preprocess(bitmap)
             val output = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(NUM_BOXES) } }
             engine.run(input, output)
-            val results = decode(output[0], bitmap.width, bitmap.height)
-            
+            val results = decode(output[0])
             PerformanceMonitor.recordInferenceTime(System.currentTimeMillis() - startTime)
-            
             return results
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
@@ -148,10 +135,7 @@ class Yolov8Detector(context: Context) {
 
     private data class RawBox(val cx: Float, val cy: Float, val w: Float, val h: Float, val classId: Int, val conf: Float)
 
-    private fun decode(output: Array<FloatArray>, imgWidth: Int, imgHeight: Int): List<Detection> {
-        this.frameWidth = imgWidth
-        this.frameHeight = imgHeight
-
+    private fun decode(output: Array<FloatArray>): List<Detection> {
         val candidates = mutableListOf<RawBox>()
         var rawBest = 0f
         var rawBestClass = -1
@@ -196,70 +180,14 @@ class Yolov8Detector(context: Context) {
                 (raw.cy + raw.h / 2f).coerceIn(0f, 1f)
             )
             
-            val detection = Detection(
+            Detection(
                 label = labels.getOrElse(raw.classId) { "?" },
                 classId = raw.classId,
                 confidence = raw.conf,
                 bounds = bounds,
-                speedInfo = SpeedInfo()
+                speedInfo = SpeedInfo() // ObjectTracker fills this in after matching across frames
             )
-            
-            val speedInfo = calculateSpeed(detection)
-            detection.copy(speedInfo = speedInfo)
         }
-    }
-
-    fun calculateSpeed(detection: Detection): SpeedInfo {
-        val key = detection.classId * 1000 + (detection.bounds.centerX() * 100).toInt()
-        val centerX = detection.bounds.centerX()
-        val centerY = detection.bounds.centerY()
-        val now = System.currentTimeMillis()
-        
-        val positions = positionHistory.getOrPut(key) { mutableListOf() }
-        val timestamps = timestampHistory.getOrPut(key) { mutableListOf() }
-        
-        positions.add(centerX to centerY)
-        timestamps.add(now)
-        
-        if (positions.size > MAX_HISTORY) {
-            positions.removeAt(0)
-            timestamps.removeAt(0)
-        }
-        
-        var speedPxPerSec = 0f
-        var direction = "stationary"
-        
-        if (positions.size >= 2) {
-            val dx = positions.last().first - positions.first().first
-            val dy = positions.last().second - positions.first().second
-            val dt = (timestamps.last() - timestamps.first()) / 1000f
-            
-            if (dt > 0.1f) {
-                speedPxPerSec = kotlin.math.sqrt(dx*dx + dy*dy) / dt
-                
-                direction = when {
-                    kotlin.math.abs(dx) > kotlin.math.abs(dy) -> {
-                        if (dx > 0) "→ Right" else "← Left"
-                    }
-                    dy < 0 -> "↑ Up"
-                    dy > 0 -> "↓ Down"
-                    else -> "stationary"
-                }
-            }
-        }
-        
-        val speedMs = speedPxPerSec * 0.3f
-        val speedKmh = speedMs * 3.6f
-        val speedMph = speedMs * 2.23694f
-        
-        return SpeedInfo(
-            speedPxPerSec = speedPxPerSec,
-            speedMs = speedMs,
-            speedKmh = speedKmh,
-            speedMph = speedMph,
-            speedMphDisplay = speedMph.toInt(),
-            direction = direction
-        )
     }
 
     private fun iou(a: RawBox, b: RawBox): Float {

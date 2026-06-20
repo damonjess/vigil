@@ -136,9 +136,11 @@ class MainActivity : ComponentActivity() {
         val scope = rememberCoroutineScope()
         
         val detector = remember { Yolov8Detector(context) }
+        val tracker = remember { ObjectTracker() }
         val storage = remember { DetectionStorage(context) }
         val reId = remember { PersonReId() }
         val plateReader = remember { PlateOcrReader() }
+        val lastSavedByTrack = remember { mutableMapOf<Int, Long>() }
         
         DisposableEffect(plateReader) {
             onDispose { plateReader.close() }
@@ -225,9 +227,10 @@ class MainActivity : ComponentActivity() {
                                                 scope.launch {
                                                     try {
                                                         // Move detection to Default dispatcher for better UI performance
-                                                        val results = withContext(Dispatchers.Default) {
+                                                        val rawResults = withContext(Dispatchers.Default) {
                                                             detector.detect(bitmap)
                                                         }
+                                                        val results = tracker.update(rawResults)
                                                         detections = results
                                                         
                                                         // Person detection with Re-ID and throttling
@@ -235,7 +238,8 @@ class MainActivity : ComponentActivity() {
                                                             .filter { it.classId == 0 && it.confidence > PERSON_CONFIDENCE_THRESHOLD }
                                                             .maxByOrNull { it.confidence }
                                                         
-                                                        if (bestPerson != null && currentTime - lastPersonTimestamp > 3000) {
+                                                        val personLastSaved = bestPerson?.let { lastSavedByTrack[it.trackId] } ?: 0L
+                                                        if (bestPerson != null && currentTime - personLastSaved > 3000) {
                                                             val area = bestPerson.bounds.width() * bestPerson.bounds.height()
                                                             if (area > MIN_PERSON_AREA) {
                                                                 try {
@@ -258,6 +262,7 @@ class MainActivity : ComponentActivity() {
                                                                         
                                                                         personDetectionCount++
                                                                         lastPersonTimestamp = currentTime
+                                                                        lastSavedByTrack[bestPerson.trackId] = currentTime
                                                                         recentLogs = storage.getRecentLogs(20)
                                                                     }
                                                                 } catch (e: Exception) {
@@ -267,11 +272,11 @@ class MainActivity : ComponentActivity() {
                                                         }
                                                         
                                                         // Vehicle handling: plate OCR + logging, throttled by time
-                                                        // (not speed — speed calc isn't reliable without a real
-                                                        // multi-frame tracker yet, see earlier notes)
                                                         val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) }
                                                         val bestVehicle = vehicles.maxByOrNull { it.confidence }
-                                                        if (bestVehicle != null && currentTime - lastVehicleTimestamp > 4000) {
+                                                        
+                                                        val vehicleLastSaved = bestVehicle?.let { lastSavedByTrack[it.trackId] } ?: 0L
+                                                        if (bestVehicle != null && currentTime - vehicleLastSaved > 4000) {
                                                             val cropped = cropDetection(bitmap, bestVehicle.bounds)
                                                             if (cropped != null && !cropped.isRecycled) {
                                                                 val plateText = try {
@@ -296,6 +301,7 @@ class MainActivity : ComponentActivity() {
                                                                 }
                                                                 if (cropped != bitmap) cropped.recycle()
                                                                 lastVehicleTimestamp = currentTime
+                                                                lastSavedByTrack[bestVehicle.trackId] = currentTime
                                                                 recentLogs = storage.getRecentLogs(20)
                                                             }
                                                         }
@@ -451,9 +457,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // Person ID
+                    // Person ID — now the real per-box tracker ID, not just "whatever was last registered"
                     if (isPerson) {
-                        val personId = "ID: ${reId.getPersonIds().lastOrNull() ?: "New"}"
+                        val personId = "ID: ${det.trackId}"
                         drawContext.canvas.nativeCanvas.apply {
                             val paint = android.graphics.Paint().apply {
                                 this.color = Color(0xFF00FF41).toArgb()
@@ -555,7 +561,8 @@ class MainActivity : ComponentActivity() {
                             onClick = { 
                                 storage.clearLogs()
                                 reId.clear()
-                                detector.clearHistory()
+                                tracker.clear()
+                                lastSavedByTrack.clear()
                                 personDetectionCount = 0
                                 recentLogs = emptyList()
                             },
