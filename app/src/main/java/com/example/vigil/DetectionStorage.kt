@@ -72,21 +72,23 @@ class DetectionStorage(private val context: Context) {
         speedMph: Int = 0,
         direction: String = "",
         personId: String = "",
-        plateText: String = ""
+        plateText: String = "",
+        videoPath: String? = null
     ): DetectionLog? = withContext(Dispatchers.IO) {
         try {
+            pruneOldLogs()
             val timestamp = System.currentTimeMillis()
             val isPerson = detection.classId == 0
             val isVehicle = detection.classId in setOf(1, 2, 3, 5, 7)
             
-            var imagePath: String? = null
+            var savedImagePath: String? = null
             var thumbnailPath: String? = null
             
             val imageToSave = zoomedBitmap ?: originalBitmap
             
             if (imageToSave != null && !imageToSave.isRecycled && imageToSave.width > 10 && imageToSave.height > 10) {
                 try {
-                    imagePath = saveImage(imageToSave, "detection_${timestamp}")
+                    savedImagePath = saveImage(imageToSave, "detection_${timestamp}")
                     
                     val thumbnail = createThumbnail(imageToSave, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
                     if (thumbnail != null && !thumbnail.isRecycled) {
@@ -105,8 +107,9 @@ class DetectionStorage(private val context: Context) {
                 confidence = detection.confidence,
                 boundingBox = detection.bounds,
                 timestamp = timestamp,
-                imagePath = imagePath,
+                imagePath = savedImagePath,
                 thumbnailPath = thumbnailPath,
+                videoPath = videoPath,
                 isPerson = isPerson,
                 isVehicle = isVehicle,
                 speedMph = speedMph,
@@ -172,6 +175,36 @@ class DetectionStorage(private val context: Context) {
             logsFile.writeText(json)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save logs", e)
+        }
+    }
+
+    private fun pruneOldLogs() {
+        // Keep logs for 3 days or max 1000 logs
+        val threeDaysAgo = System.currentTimeMillis() - (3 * 24 * 60 * 60 * 1000L)
+        
+        val (toKeep, toDelete) = cachedLogs.partition { 
+            it.timestamp > threeDaysAgo && it.id != 0L // Keep if recent
+        }
+        
+        // If we still have too many, prune by count
+        var finalKeep = toKeep
+        var extraDelete = emptyList<DetectionLog>()
+        
+        if (finalKeep.size > MAX_LOGS) {
+            extraDelete = finalKeep.drop(MAX_LOGS)
+            finalKeep = finalKeep.take(MAX_LOGS)
+        }
+        
+        val allToDelete = toDelete + extraDelete
+        
+        if (allToDelete.isNotEmpty()) {
+            allToDelete.forEach { log ->
+                log.imagePath?.let { File(it).delete() }
+                log.thumbnailPath?.let { File(it).delete() }
+            }
+            cachedLogs = finalKeep
+            saveLogs()
+            Log.d(TAG, "Pruned ${allToDelete.size} old logs")
         }
     }
 

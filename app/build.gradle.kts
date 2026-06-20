@@ -43,6 +43,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.camera:camera-extensions:$cameraxVersion")
+    implementation("androidx.camera:camera-video:$cameraxVersion")
     
     // TensorFlow Lite - FIXED with proper GPU support
     implementation("org.tensorflow:tensorflow-lite:2.16.1")

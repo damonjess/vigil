@@ -14,6 +14,7 @@ data class DetectionLog(
     val timestamp: Long = System.currentTimeMillis(),
     val imagePath: String? = null,
     val thumbnailPath: String? = null,
+    val videoPath: String? = null,
     val isPerson: Boolean = false,
     val isVehicle: Boolean = false,
     val speedMph: Int = 0,

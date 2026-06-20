@@ -98,7 +98,7 @@ class ObjectTracker {
     
     companion object {
         private const val IOU_THRESHOLD = 0.25f
-        private const val MAX_MISSED_FRAMES = 15 // Hold onto tracks for ~1 second at 15fps
+        private const val MAX_MISSED_FRAMES = 60 // Hold onto tracks for ~2 seconds at 30fps
         private const val MIN_AGE_FOR_DISPLAY = 2 // Filter out momentary flickers
     }
 

@@ -1,9 +1,11 @@
 package com.example.vigil
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -12,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.*
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -49,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import com.example.vigil.data.DetectionLog
 import kotlinx.coroutines.*
@@ -62,7 +66,7 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "MainActivity"
         private const val FRAME_INTERVAL_MS = 30L
         private const val PERSON_CONFIDENCE_THRESHOLD = 0.35f
-        private const val MIN_PERSON_AREA = 0.01f
+        private const val MIN_PERSON_AREA = 0.001f
     }
 
     private var lastFrameTime = 0L
@@ -72,7 +76,9 @@ class MainActivity : ComponentActivity() {
     private var personDetectionCount = 0
     private var lastPersonTimestamp = 0L
     private var lastVehicleTimestamp = 0L
+    private var lastVideoTimestamp = 0L
     private var isProcessing = false
+    private var currentRecording: Recording? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -88,22 +94,28 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun CameraPermissionGate() {
         val context = LocalContext.current
-        var hasPermission by remember {
+        val permissions = arrayOf(
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO
+        )
+        
+        var hasPermissions by remember {
             mutableStateOf(
-                ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                        PackageManager.PERMISSION_GRANTED
+                permissions.all {
+                    ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+                }
             )
         }
 
         val launcher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted -> hasPermission = granted }
+            ActivityResultContracts.RequestMultiplePermissions()
+        ) { results -> hasPermissions = results.values.all { it } }
 
         LaunchedEffect(Unit) {
-            if (!hasPermission) launcher.launch(Manifest.permission.CAMERA)
+            if (!hasPermissions) launcher.launch(permissions)
         }
 
-        if (hasPermission) {
+        if (hasPermissions) {
             CameraPreviewScreen()
         } else {
             Box(
@@ -117,7 +129,9 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(8.dp))
                     Text("Vigil needs camera access for AI detection", color = Color.Gray, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
                     Spacer(Modifier.height(24.dp))
-                    Button(onClick = { launcher.launch(Manifest.permission.CAMERA) },
+                    Button(onClick = { 
+                        launcher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)) 
+                    },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF41)),
                         shape = RoundedCornerShape(8.dp)) {
                         Text("Grant Permission", color = Color.Black, fontWeight = FontWeight.Bold)
@@ -160,6 +174,7 @@ class MainActivity : ComponentActivity() {
         var showStats by remember { mutableStateOf(true) }
         var detectorEnabled by remember { mutableStateOf(true) }
         var imageCaptureUseCase by remember { mutableStateOf<ImageCapture?>(null) }
+        var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
 
 
 
@@ -261,7 +276,7 @@ class MainActivity : ComponentActivity() {
                                                         
                                                         // Person detection with Re-ID and throttling
                                                         val bestPerson = results
-                                                            .filter { it.classId == 0 && it.confidence > 0.45f }
+                                                            .filter { it.classId == 0 && it.confidence > 0.35f }
                                                             .maxByOrNull { it.confidence }
                                                         
                                                         val personLastSaved = bestPerson?.let { lastSavedByTrack[it.trackId] } ?: 0L
@@ -273,7 +288,31 @@ class MainActivity : ComponentActivity() {
                                                                         try {
                                                                             captureHighResCrop(ic, bestPerson.bounds, ContextCompat.getMainExecutor(context))
                                                                         } catch (e: Exception) { null }
-                                                                    } ?: cropDetection(bitmap, bestPerson.bounds)
+                                                                    } ?: cropDetection(bitmap, bestPerson.bounds, isPerson = true)
+                                                                    
+                                                                    // TRIGGER VIDEO CLIP (throttled)
+                                                                    var videoPath: String? = null
+                                                                    if (currentTime - lastVideoTimestamp > 30000 && currentRecording == null) {
+                                                                        val file = File(context.filesDir, "vigil_${currentTime}.mp4")
+                                                                        val outputOptions = FileOutputOptions.Builder(file).build()
+                                                                        videoCaptureUseCase?.let { vc ->
+                                                                            currentRecording = vc.output.prepareRecording(context, outputOptions)
+                                                                                .start(ContextCompat.getMainExecutor(context)) { event ->
+                                                                                    if (event is VideoRecordEvent.Finalize) {
+                                                                                        currentRecording = null
+                                                                                        if (event.hasError()) file.delete()
+                                                                                    }
+                                                                                }
+                                                                            lastVideoTimestamp = currentTime
+                                                                            videoPath = file.absolutePath
+                                                                            // Auto-stop after 5 seconds
+                                                                            scope.launch {
+                                                                                delay(5000)
+                                                                                currentRecording?.stop()
+                                                                            }
+                                                                        }
+                                                                    }
+
                                                                     if (cropped != null && !cropped.isRecycled) {
                                                                         // Re-identify person
                                                                         val reIdResult = reId.identifyPerson(bitmap, bestPerson)
@@ -283,7 +322,8 @@ class MainActivity : ComponentActivity() {
                                                                                 detection = bestPerson,
                                                                                 originalBitmap = bitmap,
                                                                                 zoomedBitmap = cropped,
-                                                                                personId = reIdResult.personId
+                                                                                personId = reIdResult.personId,
+                                                                                videoPath = videoPath
                                                                             )
                                                                         }
                                                                         
@@ -311,7 +351,7 @@ class MainActivity : ComponentActivity() {
                                                                 try {
                                                                     captureHighResCrop(ic, bestVehicle.bounds, ContextCompat.getMainExecutor(context))
                                                                 } catch (e: Exception) { null }
-                                                            } ?: cropDetection(bitmap, bestVehicle.bounds)
+                                                            } ?: cropDetection(bitmap, bestVehicle.bounds, isPerson = false)
                                                             if (cropped != null && !cropped.isRecycled) {
                                                                 val plateText = try {
                                                                     plateReader.readPlate(bitmap, bestVehicle.bounds)
@@ -323,6 +363,35 @@ class MainActivity : ComponentActivity() {
                                                                     plateText = plateText ?: ""
                                                                 )
 
+                                                                // TRIGGER VIDEO CLIP (throttled)
+                                                                var videoPath: String? = null
+                                                                if (currentTime - lastVideoTimestamp > 45000 && currentRecording == null) {
+                                                                    val file = File(context.filesDir, "vigil_v_${currentTime}.mp4")
+                                                                    val outputOptions = FileOutputOptions.Builder(file).build()
+                                                                    videoCaptureUseCase?.let { vc ->
+                                                                        try {
+                                                                            currentRecording = vc.output.prepareRecording(context, outputOptions)
+                                                                                .start(ContextCompat.getMainExecutor(context)) { event ->
+                                                                                    if (event is VideoRecordEvent.Finalize) {
+                                                                                        currentRecording = null
+                                                                                        if (event.hasError()) {
+                                                                                            Log.e("MainActivity", "Video error: ${event.error}")
+                                                                                            file.delete()
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            lastVideoTimestamp = currentTime
+                                                                            videoPath = file.absolutePath
+                                                                            scope.launch {
+                                                                                delay(5000)
+                                                                                currentRecording?.stop()
+                                                                            }
+                                                                        } catch (e: Exception) {
+                                                                            Log.e("MainActivity", "Failed to start recording", e)
+                                                                        }
+                                                                    }
+                                                                }
+
                                                                 withContext(Dispatchers.IO) {
                                                                     storage.saveDetection(
                                                                         detection = vehicleWithPlate,
@@ -330,7 +399,8 @@ class MainActivity : ComponentActivity() {
                                                                         zoomedBitmap = cropped,
                                                                         speedMph = bestVehicle.speedInfo.speedMphDisplay,
                                                                         direction = bestVehicle.speedInfo.direction,
-                                                                        plateText = plateText ?: ""
+                                                                        plateText = plateText ?: "",
+                                                                        videoPath = videoPath
                                                                     )
                                                                 }
                                                                 if (cropped != bitmap) cropped.recycle()
@@ -369,11 +439,17 @@ class MainActivity : ComponentActivity() {
                             )
                             .build()
 
+                        val recorder = Recorder.Builder()
+                            .setQualitySelector(QualitySelector.from(Quality.HD))
+                            .build()
+                        val videoCapture = VideoCapture.withOutput(recorder)
+
                         cameraProvider.unbindAll()
                         cameraProvider.bindToLifecycle(
-                            lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis, imageCapture
+                            lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis, imageCapture, videoCapture
                         )
                         imageCaptureUseCase = imageCapture
+                        videoCaptureUseCase = videoCapture
                     }, ContextCompat.getMainExecutor(ctx))
 
                     previewView
@@ -696,6 +772,27 @@ class MainActivity : ComponentActivity() {
                             if (log.isPerson && log.personId.isNotEmpty()) {
                                 Text("Person ID: ${log.personId}", color = Color(0xFF00FF41), fontWeight = FontWeight.Bold)
                             }
+                            if (log.videoPath != null) {
+                                Button(
+                                    onClick = {
+                                        val file = File(log.videoPath)
+                                        if (file.exists()) {
+                                            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                            val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                setDataAndType(uri, "video/mp4")
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(intent)
+                                        }
+                                    },
+                                    modifier = Modifier.padding(top = 8.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF41))
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, null, tint = Color.Black)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Play Video Clip", color = Color.Black)
+                                }
+                            }
                             Spacer(Modifier.height(8.dp))
                             log.imagePath?.let { path ->
                                 val file = File(path)
@@ -749,17 +846,20 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun cropDetection(bitmap: Bitmap, bounds: RectF): Bitmap? {
+    private fun cropDetection(bitmap: Bitmap, bounds: RectF, isPerson: Boolean = false): Bitmap? {
         return try {
             val bw = bitmap.width
             val bh = bitmap.height
             if (bw <= 0 || bh <= 0) return null
             
-            // INCREASED PADDING FOR FAST VEHICLES
-            // We use wider horizontal padding (0.6x) and normal vertical padding (0.3x)
-            // to ensure moving cars are caught even if the box is slightly lagged.
-            val paddingX = (bounds.width() * bw * 0.6f).toInt().coerceAtLeast(40)
-            val paddingY = (bounds.height() * bh * 0.3f).toInt().coerceAtLeast(30)
+            // CUSTOM PADDING BASED ON TARGET TYPE
+            // Vehicles get wide horizontal padding to catch them at speed.
+            // People get tighter, uniform padding for a better "Zoom" look.
+            val horizontalPaddingFactor = if (isPerson) 0.2f else 0.6f
+            val verticalPaddingFactor = if (isPerson) 0.2f else 0.3f
+
+            val paddingX = (bounds.width() * bw * horizontalPaddingFactor).toInt().coerceAtLeast(if (isPerson) 20 else 40)
+            val paddingY = (bounds.height() * bh * verticalPaddingFactor).toInt().coerceAtLeast(if (isPerson) 20 else 30)
             
             val left = ((bounds.left * bw) - paddingX).toInt().coerceAtLeast(0)
             val top = ((bounds.top * bh) - paddingY).toInt().coerceAtLeast(0)
@@ -857,15 +957,28 @@ class MainActivity : ComponentActivity() {
                 if (log.imagePath != null) {
                     val file = File(log.imagePath)
                     if (file.exists()) {
-                        AsyncImage(
-                            model = file,
-                            contentDescription = "Detection",
-                            modifier = Modifier
-                                .size(60.dp)
-                                .background(Color.Black)
-                                .clip(RoundedCornerShape(4.dp)),
-                            contentScale = ContentScale.Crop
-                        )
+                        Box(contentAlignment = Alignment.BottomEnd) {
+                            AsyncImage(
+                                model = file,
+                                contentDescription = "Detection",
+                                modifier = Modifier
+                                    .size(60.dp)
+                                    .background(Color.Black)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                contentScale = ContentScale.Crop
+                            )
+                            if (log.videoPath != null) {
+                                Icon(
+                                    Icons.Default.Videocam,
+                                    null,
+                                    tint = Color.White,
+                                    modifier = Modifier
+                                        .padding(4.dp)
+                                        .size(16.dp)
+                                        .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                                )
+                            }
+                        }
                     } else {
                         Box(
                             modifier = Modifier
