@@ -54,6 +54,7 @@ import com.example.vigil.data.DetectionLog
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.concurrent.Executor
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
 class MainActivity : ComponentActivity() {
@@ -138,9 +139,13 @@ class MainActivity : ComponentActivity() {
         val reId = remember { PersonReId() }
         val plateReader = remember { PlateOcrReader() }
         val lastSavedByTrack = remember { mutableMapOf<Int, Long>() }
+        val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
         
-        DisposableEffect(plateReader) {
-            onDispose { plateReader.close() }
+        DisposableEffect(Unit) {
+            onDispose {
+                plateReader.close()
+                analysisExecutor.shutdown()
+            }
         }
         
         var statusText by remember { mutableStateOf("Loading model...") }
@@ -154,6 +159,8 @@ class MainActivity : ComponentActivity() {
         var autoZoomActive by remember { mutableStateOf(true) }
         var showStats by remember { mutableStateOf(true) }
         var imageCaptureUseCase by remember { mutableStateOf<ImageCapture?>(null) }
+
+
 
         val infiniteTransition = rememberInfiniteTransition()
         val pulseAlpha by infiniteTransition.animateFloat(
@@ -204,7 +211,7 @@ class MainActivity : ComponentActivity() {
                             .setTargetResolution(android.util.Size(1920, 1080))
                             .build()
                             .also {
-                                it.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                                it.setAnalyzer(analysisExecutor) { imageProxy ->
                                     val currentTime = System.currentTimeMillis()
                                     if (currentTime - lastFrameTime >= FRAME_INTERVAL_MS) {
                                         lastFrameTime = currentTime
@@ -342,7 +349,14 @@ class MainActivity : ComponentActivity() {
                             }
 
                         val imageCapture = ImageCapture.Builder()
-                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                            .setResolutionSelector(
+                                androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                                    .setAspectRatioStrategy(
+                                        androidx.camera.core.resolutionselector.AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                                    )
+                                    .build()
+                            )
                             .build()
 
                         cameraProvider.unbindAll()
@@ -537,7 +551,7 @@ class MainActivity : ComponentActivity() {
                         Text("VIGIL", color = Color(0xFF00FF41), fontSize = 18.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        StatusPill("${detections.size}", Icons.Default.Visibility, Color(0xFF00FF41))
+                        StatusPill("LIVE: ${detections.size}", Icons.Default.Visibility, Color(0xFF00FF41))
                         StatusPill(fpsText, Icons.Default.Speed, Color(0xFF00E5FF))
                         StatusPill("${reId.getPersonCount()}", Icons.Default.Person, Color(0xFFFF6B00))
                     }
