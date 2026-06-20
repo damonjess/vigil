@@ -24,9 +24,10 @@ class DetectionStorage(private val context: Context) {
         private const val TAG = "DetectionStorage"
         private const val LOGS_FILE = "detection_logs.json"
         private const val MAX_LOGS = 1000
-        private const val IMAGE_QUALITY = 90
         private const val THUMBNAIL_SIZE = 300
     }
+
+    private val settings = SettingsManager(context)
 
     private val gson = Gson()
     private val imagesDir: File by lazy {
@@ -133,7 +134,7 @@ class DetectionStorage(private val context: Context) {
             }
             val file = File(imagesDir, "$name.jpg")
             FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, IMAGE_QUALITY, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, settings.imageQuality, out)
             }
             file.absolutePath
         } catch (e: Exception) {

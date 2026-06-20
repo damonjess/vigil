@@ -10,9 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
+import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
@@ -53,11 +51,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.example.vigil.data.DetectionLog
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.io.File
+import java.util.concurrent.Executor
+import kotlin.coroutines.resume
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -156,6 +153,7 @@ class MainActivity : ComponentActivity() {
         var selectedLog by remember { mutableStateOf<DetectionLog?>(null) }
         var autoZoomActive by remember { mutableStateOf(true) }
         var showStats by remember { mutableStateOf(true) }
+        var imageCaptureUseCase by remember { mutableStateOf<ImageCapture?>(null) }
 
         val infiniteTransition = rememberInfiniteTransition()
         val pulseAlpha by infiniteTransition.animateFloat(
@@ -221,8 +219,19 @@ class MainActivity : ComponentActivity() {
 
                                         if (!isProcessing && modelReady) {
                                             isProcessing = true
-                                            val bitmap = imageProxy.toBitmap()
-                                            
+                                            val rawBitmap = imageProxy.toBitmap()
+                                            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+                                            val bitmap = if (rawBitmap != null && rotationDegrees != 0) {
+                                                val matrix = android.graphics.Matrix().apply {
+                                                    postRotate(rotationDegrees.toFloat())
+                                                }
+                                                android.graphics.Bitmap.createBitmap(
+                                                    rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true
+                                                ).also { if (it !== rawBitmap) rawBitmap.recycle() }
+                                            } else {
+                                                rawBitmap
+                                            }
+
                                             if (bitmap != null) {
                                                 scope.launch {
                                                     try {
@@ -243,7 +252,11 @@ class MainActivity : ComponentActivity() {
                                                             val area = bestPerson.bounds.width() * bestPerson.bounds.height()
                                                             if (area > MIN_PERSON_AREA) {
                                                                 try {
-                                                                    val cropped = cropDetection(bitmap, bestPerson.bounds)
+                                                                    val cropped = imageCaptureUseCase?.let { ic ->
+                                                                        try {
+                                                                            captureHighResCrop(ic, bestPerson.bounds, ContextCompat.getMainExecutor(context))
+                                                                        } catch (e: Exception) { null }
+                                                                    } ?: cropDetection(bitmap, bestPerson.bounds)
                                                                     if (cropped != null && !cropped.isRecycled) {
                                                                         // Re-identify person
                                                                         val reIdResult = reId.identifyPerson(bitmap, bestPerson)
@@ -277,7 +290,11 @@ class MainActivity : ComponentActivity() {
                                                         
                                                         val vehicleLastSaved = bestVehicle?.let { lastSavedByTrack[it.trackId] } ?: 0L
                                                         if (bestVehicle != null && currentTime - vehicleLastSaved > 4000) {
-                                                            val cropped = cropDetection(bitmap, bestVehicle.bounds)
+                                                            val cropped = imageCaptureUseCase?.let { ic ->
+                                                                try {
+                                                                    captureHighResCrop(ic, bestVehicle.bounds, ContextCompat.getMainExecutor(context))
+                                                                } catch (e: Exception) { null }
+                                                            } ?: cropDetection(bitmap, bestVehicle.bounds)
                                                             if (cropped != null && !cropped.isRecycled) {
                                                                 val plateText = try {
                                                                     plateReader.readPlate(bitmap, bestVehicle.bounds)
@@ -324,8 +341,15 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
+                        val imageCapture = ImageCapture.Builder()
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                            .build()
+
                         cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis, imageCapture
+                        )
+                        imageCaptureUseCase = imageCapture
                     }, ContextCompat.getMainExecutor(ctx))
 
                     previewView
@@ -661,6 +685,34 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    private suspend fun captureHighResCrop(
+        imageCapture: ImageCapture,
+        bounds: RectF,
+        executor: Executor
+    ): Bitmap? = suspendCancellableCoroutine { continuation ->
+        imageCapture.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(image: ImageProxy) {
+                val bitmap = image.toBitmap()
+                val rotation = image.imageInfo.rotationDegrees
+                image.close()
+                if (bitmap != null) {
+                    val rotated = if (rotation != 0) {
+                        val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+                        Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true).also {
+                            if (it !== bitmap) bitmap.recycle()
+                        }
+                    } else bitmap
+                    continuation.resume(cropDetection(rotated, bounds))
+                } else {
+                    continuation.resume(null)
+                }
+            }
+            override fun onError(exception: ImageCaptureException) {
+                continuation.resume(null)
+            }
+        })
     }
 
     private fun cropDetection(bitmap: Bitmap, bounds: RectF): Bitmap? {

@@ -39,7 +39,7 @@ class Yolov8Detector(context: Context) {
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 80
         private const val NUM_BOXES = 8400
-        private const val CONF_THRESHOLD = 0.25f
+        private const val CONF_THRESHOLD = 0.18f
         private const val IOU_THRESHOLD = 0.45f
         private val PERSON = 0
         private val VEHICLES = setOf(1, 2, 3, 5, 7)
@@ -117,19 +117,52 @@ class Yolov8Detector(context: Context) {
         }
     }
 
+    // Letterbox state from the most recent preprocess() call — decode() needs these
+    // to map model-space boxes back to the original frame correctly, instead of
+    // assuming a plain stretch (which distorts non-square frames at an angle).
+    private var letterboxScale = 1f
+    private var letterboxPadX = 0f
+    private var letterboxPadY = 0f
+    private var imgWidth = 0
+    private var imgHeight = 0
+
     private fun preprocess(bitmap: Bitmap): ByteBuffer {
-        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
+        val srcW = bitmap.width
+        val srcH = bitmap.height
+        imgWidth = srcW
+        imgHeight = srcH
+
+        val scale = minOf(INPUT_SIZE.toFloat() / srcW, INPUT_SIZE.toFloat() / srcH)
+        val scaledW = (srcW * scale).toInt().coerceAtLeast(1)
+        val scaledH = (srcH * scale).toInt().coerceAtLeast(1)
+        val padX = (INPUT_SIZE - scaledW) / 2f
+        val padY = (INPUT_SIZE - scaledH) / 2f
+
+        letterboxScale = scale
+        letterboxPadX = padX
+        letterboxPadY = padY
+
+        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledW, scaledH, true)
+
+        // Gray canvas (114,114,114) — the Ultralytics letterbox convention — with the
+        // scaled image centered on it, instead of stretching to fill the full square.
+        val canvas = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        val canvasObj = android.graphics.Canvas(canvas)
+        canvasObj.drawColor(android.graphics.Color.rgb(114, 114, 114))
+        canvasObj.drawBitmap(scaledBitmap, padX, padY, null)
+        if (scaledBitmap !== bitmap) scaledBitmap.recycle()
+
         val buffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
         buffer.order(ByteOrder.nativeOrder())
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+        canvas.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
         for (p in pixels) {
             buffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
             buffer.putFloat(((p shr 8) and 0xFF) / 255.0f)
             buffer.putFloat((p and 0xFF) / 255.0f)
         }
         buffer.rewind()
-        if (resized !== bitmap) resized.recycle()
+        canvas.recycle()
         return buffer
     }
 
@@ -172,12 +205,31 @@ class Yolov8Detector(context: Context) {
             }
         }
 
-        return finalBoxes.map { raw ->
+        return finalBoxes.mapNotNull { raw ->
+            // raw.cx/cy/w/h are normalized 0..1 against the padded 640x640 input.
+            // Convert to pixel space in that 640x640 frame, remove the letterbox
+            // padding/scale, then re-normalize against the ORIGINAL frame size.
+            val cxPix = raw.cx * INPUT_SIZE
+            val cyPix = raw.cy * INPUT_SIZE
+            val wPix = raw.w * INPUT_SIZE
+            val hPix = raw.h * INPUT_SIZE
+
+            val origCx = (cxPix - letterboxPadX) / letterboxScale
+            val origCy = (cyPix - letterboxPadY) / letterboxScale
+            val origW = wPix / letterboxScale
+            val origH = hPix / letterboxScale
+
+            // Reject implausibly tiny boxes — a common pattern in low-confidence
+            // false positives (tree branches, sky texture, etc.)
+            val boxArea = origW * origH
+            val frameArea = imgWidth.toFloat() * imgHeight.toFloat()
+            if (boxArea / frameArea < 0.0015f) return@mapNotNull null
+
             val bounds = RectF(
-                (raw.cx - raw.w / 2f).coerceIn(0f, 1f),
-                (raw.cy - raw.h / 2f).coerceIn(0f, 1f),
-                (raw.cx + raw.w / 2f).coerceIn(0f, 1f),
-                (raw.cy + raw.h / 2f).coerceIn(0f, 1f)
+                ((origCx - origW / 2f) / imgWidth).coerceIn(0f, 1f),
+                ((origCy - origH / 2f) / imgHeight).coerceIn(0f, 1f),
+                ((origCx + origW / 2f) / imgWidth).coerceIn(0f, 1f),
+                ((origCy + origH / 2f) / imgHeight).coerceIn(0f, 1f)
             )
             
             Detection(
