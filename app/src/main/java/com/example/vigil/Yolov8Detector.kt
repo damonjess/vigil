@@ -131,20 +131,19 @@ class Yolov8Detector(context: Context) {
         val srcH = bitmap.height
 
         val scale = minOf(INPUT_SIZE.toFloat() / srcW, INPUT_SIZE.toFloat() / srcH)
-        val scaledW = (srcW * scale).toInt().coerceAtLeast(1)
-        val scaledH = (srcH * scale).toInt().coerceAtLeast(1)
-        val padX = (INPUT_SIZE - scaledW) / 2f
-        val padY = (INPUT_SIZE - scaledH) / 2f
-
-        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledW, scaledH, true)
+        val padX = (INPUT_SIZE - srcW * scale) / 2f
+        val padY = (INPUT_SIZE - srcH * scale) / 2f
 
         // Gray canvas (114,114,114) — the Ultralytics letterbox convention — with the
         // scaled image centered on it, instead of stretching to fill the full square.
         val canvas = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
         val canvasObj = android.graphics.Canvas(canvas)
         canvasObj.drawColor(android.graphics.Color.rgb(114, 114, 114))
-        canvasObj.drawBitmap(scaledBitmap, padX, padY, null)
-        if (scaledBitmap !== bitmap) scaledBitmap.recycle()
+        
+        val matrix = android.graphics.Matrix()
+        matrix.postScale(scale, scale)
+        matrix.postTranslate(padX, padY)
+        canvasObj.drawBitmap(bitmap, matrix, null)
 
         val buffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
         buffer.order(ByteOrder.nativeOrder())

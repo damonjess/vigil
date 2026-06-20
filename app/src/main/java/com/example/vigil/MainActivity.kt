@@ -60,7 +60,7 @@ import kotlin.coroutines.resume
 class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "MainActivity"
-        private const val FRAME_INTERVAL_MS = 66L
+        private const val FRAME_INTERVAL_MS = 30L
         private const val PERSON_CONFIDENCE_THRESHOLD = 0.35f
         private const val MIN_PERSON_AREA = 0.01f
     }
@@ -209,7 +209,16 @@ class MainActivity : ComponentActivity() {
                         val analysis = ImageAnalysis.Builder()
                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setTargetResolution(android.util.Size(1920, 1080))
+                            .setResolutionSelector(
+                                androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                                    .setResolutionStrategy(
+                                        androidx.camera.core.resolutionselector.ResolutionStrategy(
+                                            android.util.Size(1280, 720),
+                                            androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                        )
+                                    )
+                                    .build()
+                            )
                             .build()
                             .also {
                                 it.setAnalyzer(analysisExecutor) { imageProxy ->
