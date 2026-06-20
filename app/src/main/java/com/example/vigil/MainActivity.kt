@@ -158,6 +158,7 @@ class MainActivity : ComponentActivity() {
         var selectedLog by remember { mutableStateOf<DetectionLog?>(null) }
         var autoZoomActive by remember { mutableStateOf(true) }
         var showStats by remember { mutableStateOf(true) }
+        var detectorEnabled by remember { mutableStateOf(true) }
         var imageCaptureUseCase by remember { mutableStateOf<ImageCapture?>(null) }
 
 
@@ -224,7 +225,7 @@ class MainActivity : ComponentActivity() {
                                             fpsText = "$currentFps FPS"
                                         }
 
-                                        if (!isProcessing && modelReady) {
+                                        if (!isProcessing && modelReady && detectorEnabled) {
                                             isProcessing = true
                                             val rawBitmap = imageProxy.toBitmap()
                                             val rotationDegrees = imageProxy.imageInfo.rotationDegrees
@@ -518,7 +519,7 @@ class MainActivity : ComponentActivity() {
             }
 
             // Scanning animation
-            if (detections.isEmpty()) {
+            if (detections.isEmpty() && detectorEnabled) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val scanY = size.height * (0.3f + 0.4f * (System.currentTimeMillis() % 3000) / 3000f)
                     drawLine(Color(0xFF00FF41).copy(alpha = 0.15f), Offset(0f, scanY), Offset(size.width, scanY), strokeWidth = 2f)
@@ -581,6 +582,16 @@ class MainActivity : ComponentActivity() {
                     }
                     
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ControlButton(
+                            text = if (detectorEnabled) "🛑 STOP" else "▶ START",
+                            active = detectorEnabled,
+                            color = if (detectorEnabled) Color.Red else Color(0xFF00FF41),
+                            modifier = Modifier.weight(1f)
+                        ) { 
+                            detectorEnabled = !detectorEnabled 
+                            if (!detectorEnabled) detections = emptyList()
+                        }
+
                         ControlButton(
                             text = if (autoZoomActive) "🔍 ZOOM ON" else "ZOOM",
                             active = autoZoomActive,
