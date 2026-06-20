@@ -768,24 +768,33 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun StatusPill(text: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color) {
         Surface(
-            color = color.copy(alpha = 0.15f),
+            color = color.copy(alpha = 0.2f),
             shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.3f))
+            border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.4f))
         ) {
-            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = color, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(text, color = color, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, null, tint = color, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(text, color = color, fontSize = 13.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
             }
         }
     }
 
     @Composable
     fun StatItem(icon: String, text: String, color: Color) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(icon, fontSize = 14.sp)
-            Spacer(Modifier.width(4.dp))
-            Text(text, color = color, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+        Surface(
+            color = color.copy(alpha = 0.1f),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier.padding(horizontal = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(icon, fontSize = 18.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(text, color = color, fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            }
         }
     }
 
@@ -793,14 +802,21 @@ class MainActivity : ComponentActivity() {
     fun ControlButton(text: String, active: Boolean, color: Color, modifier: Modifier = Modifier, onClick: () -> Unit) {
         Button(
             onClick = onClick,
-            modifier = modifier.height(44.dp),
+            modifier = modifier.height(48.dp),
             colors = ButtonDefaults.buttonColors(
-                containerColor = if (active) color.copy(alpha = 0.2f) else Color(0xFF1A1A1A)
+                containerColor = if (active) color.copy(alpha = 0.25f) else Color(0xFF252525)
             ),
-            shape = RoundedCornerShape(8.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (active) color else Color.Gray.copy(alpha = 0.3f))
+            shape = RoundedCornerShape(10.dp),
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, if (active) color else Color.Gray.copy(alpha = 0.5f)),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
         ) {
-            Text(text, color = if (active) color else Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal)
+            Text(
+                text, 
+                color = if (active) color else Color.White, 
+                fontSize = 12.sp, 
+                fontFamily = FontFamily.Monospace, 
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 
