@@ -261,7 +261,7 @@ class MainActivity : ComponentActivity() {
                                                         
                                                         // Person detection with Re-ID and throttling
                                                         val bestPerson = results
-                                                            .filter { it.classId == 0 && it.confidence > PERSON_CONFIDENCE_THRESHOLD }
+                                                            .filter { it.classId == 0 && it.confidence > 0.45f }
                                                             .maxByOrNull { it.confidence }
                                                         
                                                         val personLastSaved = bestPerson?.let { lastSavedByTrack[it.trackId] } ?: 0L
@@ -302,7 +302,7 @@ class MainActivity : ComponentActivity() {
                                                         }
                                                         
                                                         // Vehicle handling: plate OCR + logging, throttled by time
-                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) }
+                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) && it.confidence > 0.45f }
                                                         val bestVehicle = vehicles.maxByOrNull { it.confidence }
                                                         
                                                         val vehicleLastSaved = bestVehicle?.let { lastSavedByTrack[it.trackId] } ?: 0L
@@ -755,8 +755,11 @@ class MainActivity : ComponentActivity() {
             val bh = bitmap.height
             if (bw <= 0 || bh <= 0) return null
             
-            val paddingX = (bounds.width() * bw * 0.3f).toInt().coerceAtLeast(20)
-            val paddingY = (bounds.height() * bh * 0.3f).toInt().coerceAtLeast(20)
+            // INCREASED PADDING FOR FAST VEHICLES
+            // We use wider horizontal padding (0.6x) and normal vertical padding (0.3x)
+            // to ensure moving cars are caught even if the box is slightly lagged.
+            val paddingX = (bounds.width() * bw * 0.6f).toInt().coerceAtLeast(40)
+            val paddingY = (bounds.height() * bh * 0.3f).toInt().coerceAtLeast(30)
             
             val left = ((bounds.left * bw) - paddingX).toInt().coerceAtLeast(0)
             val top = ((bounds.top * bh) - paddingY).toInt().coerceAtLeast(0)

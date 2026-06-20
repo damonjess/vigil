@@ -191,10 +191,7 @@ class DetectionStorage(private val context: Context) {
         val total = cachedLogs.size
         val persons = cachedLogs.count { it.isPerson }
         val vehicles = cachedLogs.count { it.isVehicle }
-        val lastHour = cachedLogs.count { 
-            System.currentTimeMillis() - it.timestamp < 3600000 
-        }
-        return "Total: $total | People: $persons | Vehicles: $vehicles | Last Hour: $lastHour"
+        return "Total: $total | P: $persons | V: $vehicles"
     }
 
     suspend fun exportToGallery(log: DetectionLog): Boolean = withContext(Dispatchers.IO) {

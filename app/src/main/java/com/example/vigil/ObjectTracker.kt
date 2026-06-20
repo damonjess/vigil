@@ -25,6 +25,36 @@ class TrackedObject(
     var persistentPersonId: String = ""
     var persistentPlateText: String = ""
 
+    /**
+     * Estimates the current position of the object by extrapolating from its last known velocity.
+     * This helps sync the visual bounding box with reality when there's processing latency.
+     */
+    fun getExtrapolatedBounds(): RectF {
+        if (positionHistory.size < 2) return detection.bounds
+        
+        val now = System.currentTimeMillis()
+        val dt = (now - lastSeen) / 1000f
+        
+        // Don't extrapolate too far (e.g. more than 200ms) to avoid wild jitter
+        val capDt = dt.coerceAtMost(0.2f)
+        
+        val dx = positionHistory.last().first - positionHistory[positionHistory.size - 2].first
+        val dy = positionHistory.last().second - positionHistory[positionHistory.size - 2].second
+        val timeStep = (timestampHistory.last() - timestampHistory[timestampHistory.size - 2]) / 1000f
+        
+        if (timeStep <= 0) return detection.bounds
+        
+        val vx = dx / timeStep
+        val vy = dy / timeStep
+        
+        val offsetLinesX = vx * capDt
+        val offsetLinesY = vy * capDt
+        
+        return RectF(detection.bounds).apply {
+            offset(offsetLinesX, offsetLinesY)
+        }
+    }
+
     fun update(newDetection: Detection) {
         // Sync persistent metadata
         if (newDetection.personId.isNotEmpty()) {
@@ -142,7 +172,10 @@ class ObjectTracker {
         // 6. Return detections from active tracks (those seen recently and passing age threshold)
         return trackedObjects.filter { 
             (it.age >= MIN_AGE_FOR_DISPLAY && it.missedFrames <= 3) || (it.missedFrames == 0)
-        }.map { it.detection }
+        }.map { 
+            val extrapolated = it.getExtrapolatedBounds()
+            it.detection.copy(bounds = extrapolated)
+        }
     }
 
     fun clear() {
