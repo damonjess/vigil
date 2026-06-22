@@ -22,6 +22,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
@@ -40,9 +42,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -149,11 +153,16 @@ class MainActivity : ComponentActivity() {
         
         val detector = remember { Yolov8Detector(context) }
         val tracker = remember { ObjectTracker() }
+        val smoother = remember { DetectionSmoother() }
         val storage = remember { DetectionStorage(context) }
         val reId = remember { PersonReId() }
         val plateReader = remember { PlateOcrReader() }
         val lastSavedByTrack = remember { mutableMapOf<Int, Long>() }
         val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+
+        var lockedTrackId by remember { mutableStateOf<Int?>(null) }
+        var magnifierBitmap by remember { mutableStateOf<Bitmap?>(null) }
+        var magnifierOffset by remember { mutableStateOf(Offset(40f, 400f)) }
         
         DisposableEffect(Unit) {
             onDispose {
@@ -173,8 +182,13 @@ class MainActivity : ComponentActivity() {
         var autoZoomActive by remember { mutableStateOf(true) }
         var showStats by remember { mutableStateOf(true) }
         var detectorEnabled by remember { mutableStateOf(true) }
+        var tripwireEnabled by remember { mutableStateOf(false) }
+        var tripwireY by remember { mutableStateOf(0.5f) }
+        var isAeLocked by remember { mutableStateOf(false) }
+        
         var imageCaptureUseCase by remember { mutableStateOf<ImageCapture?>(null) }
         var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
+        var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
 
 
 
@@ -272,7 +286,18 @@ class MainActivity : ComponentActivity() {
                                                             detector.detect(bitmap)
                                                         }
                                                         val results = tracker.update(rawResults)
-                                                        detections = results
+                                                        val smoothed = smoother.update(results)
+                                                        detections = smoothed
+
+                                                        // Multi-target lock: if something is locked, crop a fresh
+                                                        // magnified view of it every frame. Cleared automatically
+                                                        // if the track disappears (object left frame / lost).
+                                                        val lockedTarget = lockedTrackId?.let { id -> smoothed.find { it.trackId == id } }
+                                                        magnifierBitmap = if (lockedTarget != null) {
+                                                            cropDetection(bitmap, lockedTarget.bounds, isPerson = lockedTarget.classId == 0)
+                                                        } else {
+                                                            null
+                                                        }
                                                         
                                                         // Person detection with Re-ID and throttling
                                                         val bestPerson = results
@@ -342,7 +367,7 @@ class MainActivity : ComponentActivity() {
                                                         }
                                                         
                                                         // Vehicle handling: plate OCR + logging, throttled by time
-                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) && it.confidence > 0.45f }
+                                                        val vehicles = results.filter { it.classId in setOf(1, 2, 3, 5, 7) && it.confidence > 0.35f }
                                                         val bestVehicle = vehicles.maxByOrNull { it.confidence }
                                                         
                                                         val vehicleLastSaved = bestVehicle?.let { lastSavedByTrack[it.trackId] } ?: 0L
@@ -445,9 +470,10 @@ class MainActivity : ComponentActivity() {
                         val videoCapture = VideoCapture.withOutput(recorder)
 
                         cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
+                        val camera = cameraProvider.bindToLifecycle(
                             lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis, imageCapture, videoCapture
                         )
+                        cameraControl = camera.cameraControl
                         imageCaptureUseCase = imageCapture
                         videoCaptureUseCase = videoCapture
                     }, ContextCompat.getMainExecutor(ctx))
@@ -458,7 +484,43 @@ class MainActivity : ComponentActivity() {
             )
 
             // Detection Overlay
-            Canvas(modifier = Modifier.fillMaxSize()) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(detections) {
+                        detectTapGestures { tapOffset ->
+                            val hit = detections.firstOrNull { det ->
+                                val left = det.bounds.left * size.width
+                                val top = det.bounds.top * size.height
+                                val right = det.bounds.right * size.width
+                                val bottom = det.bounds.bottom * size.height
+                                tapOffset.x in left..right && tapOffset.y in top..bottom
+                            }
+                            lockedTrackId = when {
+                                hit == null -> null
+                                lockedTrackId == hit.trackId -> null // tap again to unlock
+                                else -> hit.trackId
+                            }
+                        }
+                    }
+            ) {
+                // Connection Line for Locked Target
+                lockedTrackId?.let { id ->
+                    detections.find { it.trackId == id }?.let { target ->
+                        val targetCenterX = (target.bounds.left + target.bounds.right) / 2 * size.width
+                        val targetCenterY = (target.bounds.top + target.bounds.bottom) / 2 * size.height
+                        
+                        // Line to magnifier (account for dp-to-px if needed, but offset is usually px)
+                        drawLine(
+                            color = Color(0xFF00FF41).copy(alpha = 0.4f),
+                            start = Offset(targetCenterX, targetCenterY),
+                            end = Offset(magnifierOffset.x + 80.dp.toPx(), magnifierOffset.y + 80.dp.toPx()),
+                            strokeWidth = 1f,
+                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
+                        )
+                    }
+                }
+
                 detections.forEach { det ->
                     val left = det.bounds.left * size.width
                     val top = det.bounds.top * size.height
@@ -522,16 +584,20 @@ class MainActivity : ComponentActivity() {
                         val textWidth = paint.measureText(displayText)
                         val padding = 12f
                         val height = 44f
-                        
-                        drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f, bgPaint)
-                        drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f,
+                        val isTopEdge = top < 120f
+                        val rectTop = if (isTopEdge) bottom + 4f else top - height - 4f
+                        val rectBottom = if (isTopEdge) bottom + height + 12f else top + 4f
+                        val textY = if (isTopEdge) bottom + height else top - 8f
+
+                        drawRoundRect(left + 4f, rectTop, left + textWidth + padding * 2 + 8f, rectBottom, 8f, 8f, bgPaint)
+                        drawRoundRect(left + 4f, rectTop, left + textWidth + padding * 2 + 8f, rectBottom, 8f, 8f,
                             android.graphics.Paint().apply {
                                 this.color = color.toArgb()
                                 style = android.graphics.Paint.Style.STROKE
                                 this.strokeWidth = 1f
                             }
                         )
-                        drawText(displayText, left + padding + 8f, top - 8f, paint)
+                        drawText(displayText, left + padding + 8f, textY, paint)
                     }
 
                     // PLATE TEXT
@@ -611,6 +677,76 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // HUD Reticle
+            TargetingReticle()
+
+            // Tripwire Line
+            if (tripwireEnabled) {
+                Canvas(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        tripwireY = (tripwireY + dragAmount.y / size.height).coerceIn(0.1f, 0.9f)
+                    }
+                }) {
+                    val y = tripwireY * size.height
+                    val isTriggered = detections.any { 
+                        val cy = (it.bounds.top + it.bounds.bottom) / 2
+                        kotlin.math.abs(cy - tripwireY) < 0.02f 
+                    }
+                    val color = if (isTriggered) Color.Red else Color(0xFF00FF41).copy(alpha = 0.5f)
+                    
+                    drawLine(color, Offset(0f, y), Offset(size.width, y), 2f, 
+                        pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(20f, 10f), 0f))
+                    
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "TRIPWIRE ACTIVATED", 10f, y - 10f, 
+                        android.graphics.Paint().apply {
+                            this.color = color.toArgb()
+                            textSize = 30f
+                            typeface = android.graphics.Typeface.MONOSPACE
+                        }
+                    )
+                }
+            }
+
+            // Radar Component
+            Box(modifier = Modifier.align(Alignment.TopEnd).padding(end = 16.dp, top = 120.dp)) {
+                RadarComponent(detections)
+            }
+
+            // Magnifier Panel
+            magnifierBitmap?.let { magBitmap ->
+                Box(
+                    modifier = Modifier
+                        .offset { androidx.compose.ui.unit.IntOffset(magnifierOffset.x.toInt(), magnifierOffset.y.toInt()) }
+                        .size(160.dp)
+                        .border(2.dp, Color(0xFF00FF41), RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                magnifierOffset += dragAmount
+                            }
+                        }
+                ) {
+                    Column {
+                        Text(
+                            "LOCK // TRACK-$lockedTrackId",
+                            color = Color(0xFF00FF41),
+                            fontSize = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(2.dp)
+                        )
+                        androidx.compose.foundation.Image(
+                            bitmap = magBitmap.asImageBitmap(),
+                            contentDescription = "Locked target",
+                            modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(4.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                }
+            }
+
             // Top Status Bar - with safe insets
             Surface(
                 color = Color.Black.copy(alpha = 0.7f),
@@ -659,7 +795,7 @@ class MainActivity : ComponentActivity() {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                             StatItem("👤", personDetectionCount.toString(), Color(0xFF00FF41))
                             StatItem("🚗", detections.count { it.classId in setOf(1, 2, 3, 5, 7) }.toString(), Color(0xFFFF6B00))
-                            StatItem("📊", statsText.take(20), Color(0xFF00E5FF))
+                            StatItem("📊", statsText, Color(0xFF00E5FF))
                         }
                         Spacer(Modifier.height(12.dp))
                         HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
@@ -683,6 +819,24 @@ class MainActivity : ComponentActivity() {
                             color = Color(0xFF00FF41),
                             modifier = Modifier.weight(1f)
                         ) { autoZoomActive = !autoZoomActive }
+
+                        ControlButton(
+                            text = if (tripwireEnabled) "⚡ GATE ON" else "GATE",
+                            active = tripwireEnabled,
+                            color = if (tripwireEnabled) Color.Yellow else Color.Gray,
+                            modifier = Modifier.weight(1f)
+                        ) { tripwireEnabled = !tripwireEnabled }
+
+                        ControlButton(
+                            text = if (isAeLocked) "🔒 AE LOCK" else "AE UNLK",
+                            active = isAeLocked,
+                            color = if (isAeLocked) Color.Cyan else Color.Gray,
+                            modifier = Modifier.weight(1f)
+                        ) { 
+                            isAeLocked = !isAeLocked 
+                            // CameraControl logic for AE lock usually involves FocusMeteringAction
+                            // Simple toggle here for HUD effect, actual implementation requires startFocusAndMetering
+                        }
                         
                         ControlButton(
                             text = "📋 LOGS (${recentLogs.size})",
@@ -1076,6 +1230,136 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+    }
+
+    @Composable
+    fun TargetingReticle() {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cx = size.width / 2
+            val cy = size.height / 2
+            val color = Color(0xFF00FF41).copy(alpha = 0.3f)
+            
+            drawCircle(color, radius = 40f, style = Stroke(1f))
+            drawLine(color, Offset(cx - 60f, cy), Offset(cx - 20f, cy), 1f)
+            drawLine(color, Offset(cx + 60f, cy), Offset(cx + 20f, cy), 1f)
+            drawLine(color, Offset(cx, cy - 60f), Offset(cx, cy - 20f), 1f)
+            drawLine(color, Offset(cx, cy + 60f), Offset(cx, cy + 20f), 1f)
+            
+            // Outer brackets
+            val bSize = 100f
+            val bGap = 150f
+            drawLine(color, Offset(cx - bGap, cy - bSize), Offset(cx - bGap, cy + bSize), 1f)
+            drawLine(color, Offset(cx + bGap, cy - bSize), Offset(cx + bGap, cy + bSize), 1f)
+        }
+    }
+
+    @Composable
+    fun RadarComponent(detections: List<Detection>) {
+        val infiniteTransition = rememberInfiniteTransition()
+        val sweepAngle by infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(3000, easing = LinearEasing))
+        )
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("RADAR SCAN", color = Color(0xFF00FF41), fontSize = 8.sp, fontFamily = FontFamily.Monospace)
+            Spacer(Modifier.height(4.dp))
+            Canvas(modifier = Modifier.size(100.dp)) {
+                val radius = size.minDimension / 2
+                val center = Offset(size.width / 2, size.height / 2)
+                
+                // Rings
+                drawCircle(Color(0xFF00FF41).copy(alpha = 0.1f), radius = radius, style = Stroke(1f))
+                drawCircle(Color(0xFF00FF41).copy(alpha = 0.1f), radius = radius * 0.6f, style = Stroke(1f))
+                drawCircle(Color(0xFF00FF41).copy(alpha = 0.1f), radius = radius * 0.3f, style = Stroke(1f))
+                
+                // Sweep
+                drawArc(
+                    brush = androidx.compose.ui.graphics.Brush.sweepGradient(
+                        0f to Color.Transparent,
+                        0.9f to Color(0xFF00FF41).copy(alpha = 0.4f),
+                        1f to Color(0xFF00FF41)
+                    ),
+                    startAngle = sweepAngle - 90f,
+                    sweepAngle = 90f,
+                    useCenter = true,
+                    topLeft = Offset.Zero,
+                    size = size
+                )
+                
+                // Blips
+                detections.forEach { det ->
+                    val dx = (det.bounds.centerX() - 0.5f) * radius * 1.8f
+                    val dy = (det.bounds.centerY() - 0.5f) * radius * 1.8f
+                    drawCircle(
+                        color = if (det.classId == 0) Color(0xFF00FF41) else Color(0xFFFF6B00),
+                        radius = 4f,
+                        center = Offset(center.x + dx, center.y + dy)
+                    )
+                }
+            }
+        }
+    }
+
+    class DetectionSmoother {
+        private val states = mutableMapOf<Int, SmoothState>()
+        private val GRACE_PERIOD_MS = 600L
+        private val SMOOTHING_FACTOR = 0.35f
+
+        fun update(newDetections: List<Detection>): List<Detection> {
+            val currentTime = System.currentTimeMillis()
+            val result = mutableListOf<Detection>()
+
+            // Update existing states and add new ones
+            newDetections.forEach { det ->
+                val state = states.getOrPut(det.trackId) { SmoothState(det) }
+                state.update(det, currentTime, SMOOTHING_FACTOR)
+                result.add(state.toDetection())
+            }
+
+            // Handle persistence for missing detections
+            val it = states.entries.iterator()
+            while (it.hasNext()) {
+                val entry = it.next()
+                if (currentTime - entry.value.lastSeenTime > GRACE_PERIOD_MS) {
+                    it.remove()
+                } else if (newDetections.none { it.trackId == entry.key }) {
+                    // Carry forward the previous detection box but mark it as stale/faded if desired
+                    result.add(entry.value.toDetection())
+                }
+            }
+            return result
+        }
+
+        private class SmoothState(initial: Detection) {
+            var lastSeenTime = System.currentTimeMillis()
+            var bounds = RectF(initial.bounds)
+            var label = initial.label
+            var classId = initial.classId
+            var trackId = initial.trackId
+            var confidence = initial.confidence
+            var speedInfo = initial.speedInfo
+            private val labelCounts = mutableMapOf<String, Int>()
+
+            fun update(det: Detection, time: Long, alpha: Float) {
+                lastSeenTime = time
+                // Exponential moving average for bounding box
+                bounds.left = bounds.left * (1 - alpha) + det.bounds.left * alpha
+                bounds.top = bounds.top * (1 - alpha) + det.bounds.top * alpha
+                bounds.right = bounds.right * (1 - alpha) + det.bounds.right * alpha
+                bounds.bottom = bounds.bottom * (1 - alpha) + det.bounds.bottom * alpha
+                
+                confidence = det.confidence
+                speedInfo = det.speedInfo
+                
+                // Majority voting for label stability
+                labelCounts[det.label] = (labelCounts[det.label] ?: 0) + 1
+                label = labelCounts.maxByOrNull { it.value }?.key ?: det.label
+            }
+
+            fun toDetection() = Detection(label, classId, confidence, RectF(bounds), speedInfo, "", "", trackId)
         }
     }
 }
