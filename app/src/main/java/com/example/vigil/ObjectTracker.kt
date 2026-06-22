@@ -4,137 +4,68 @@ import android.graphics.RectF
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.sqrt
 
-/**
- * TrackedObject represents a single object being tracked across multiple frames.
- * It maintains the detection state, a unique ID, and movement history for speed estimation.
- */
-class TrackedObject(
-    var detection: Detection,
-    val id: Int,
-    val firstSeen: Long = System.currentTimeMillis()
-) {
-    var lastSeen: Long = System.currentTimeMillis()
-    var missedFrames: Int = 0
-    var age: Int = 0
-    
-    // History for speed and direction calculation
+class TrackedObject(var detection: Detection, val id: Int, val firstSeen: Long) {
+    var lastSeen = firstSeen
+    var missedFrames = 0
+    var age = 0
     val positionHistory = mutableListOf<Pair<Float, Float>>()
     val timestampHistory = mutableListOf<Long>()
-    
-    // Track-specific metadata that persists across frames
-    var persistentPersonId: String = ""
-    var persistentPlateText: String = ""
+    var persistentPersonId = ""
+    var persistentPlateText = ""
 
-    /**
-     * Estimates the current position of the object by extrapolating from its last known velocity.
-     * This helps sync the visual bounding box with reality when there's processing latency.
-     */
-    fun getExtrapolatedBounds(): RectF {
+    fun getExtrapolatedBounds(currentFrameTimeNs: Long): RectF {
         if (positionHistory.size < 2) return detection.bounds
-        
-        val now = System.currentTimeMillis()
-        val dt = (now - lastSeen) / 1000f
-        
-        // Don't extrapolate too far (e.g. more than 200ms) to avoid wild jitter
-        val capDt = dt.coerceAtMost(0.2f)
-        
+        val dt = (currentFrameTimeNs - lastSeen) / 1_000_000_000f
+        val capDt = dt.coerceIn(0f, 0.2f)
         val dx = positionHistory.last().first - positionHistory[positionHistory.size - 2].first
         val dy = positionHistory.last().second - positionHistory[positionHistory.size - 2].second
-        val timeStep = (timestampHistory.last() - timestampHistory[timestampHistory.size - 2]) / 1000f
-        
+        val timeStep = (timestampHistory.last() - timestampHistory[timestampHistory.size - 2]) / 1_000_000_000f
+    
         if (timeStep <= 0) return detection.bounds
-        
-        val vx = dx / timeStep
-        val vy = dy / timeStep
-        
-        val offsetLinesX = vx * capDt
-        val offsetLinesY = vy * capDt
-        
-        return RectF(detection.bounds).apply {
-            offset(offsetLinesX, offsetLinesY)
-        }
+        return RectF(detection.bounds).apply { offset((dx / timeStep) * capDt, (dy / timeStep) * capDt) }
     }
 
-    fun update(newDetection: Detection) {
-        // Sync persistent metadata
-        if (newDetection.personId.isNotEmpty()) {
-            persistentPersonId = newDetection.personId
-        } else {
-            newDetection.personId = persistentPersonId
-        }
-        
-        if (newDetection.plateText.isNotEmpty()) {
-            persistentPlateText = newDetection.plateText
-        } else {
-            newDetection.plateText = persistentPlateText
-        }
-
+    fun update(newDetection: Detection, frameTimeNs: Long) {
+        if (newDetection.personId.isNotEmpty()) persistentPersonId = newDetection.personId else newDetection.personId = persistentPersonId
+        if (newDetection.plateText.isNotEmpty()) persistentPlateText = newDetection.plateText else newDetection.plateText = persistentPlateText
         detection = newDetection.copy(trackId = id)
-        lastSeen = System.currentTimeMillis()
+        lastSeen = frameTimeNs
         missedFrames = 0
         age++
-        
-        val centerX = newDetection.bounds.centerX()
-        val centerY = newDetection.bounds.centerY()
-        positionHistory.add(centerX to centerY)
-        timestampHistory.add(lastSeen)
-        
-        // Keep a window for speed calculation (approx 0.5 - 1.0 seconds of history)
-        if (positionHistory.size > 15) {
+        positionHistory.add(newDetection.bounds.centerX() to newDetection.bounds.centerY())
+        timestampHistory.add(frameTimeNs)
+        if (positionHistory.size > 15) { 
             positionHistory.removeAt(0)
-            timestampHistory.removeAt(0)
+            timestampHistory.removeAt(0) 
         }
     }
 }
 
-/**
- * ObjectTracker implements IOU-based multi-object tracking.
- * It associates new detections with existing tracks to maintain identity over time.
- * This is a simplified version of the SORT (Simple Online and Realtime Tracking) algorithm.
- */
 class ObjectTracker {
     private val nextId = AtomicInteger(1)
     private var trackedObjects = mutableListOf<TrackedObject>()
-    
-    companion object {
-        private const val IOU_THRESHOLD = 0.25f
-        private const val MAX_MISSED_FRAMES = 60 // Hold onto tracks for ~2 seconds at 30fps
-        private const val MIN_AGE_FOR_DISPLAY = 2 // Filter out momentary flickers
-    }
 
-    /**
-     * Processes a new list of detections and updates the internal tracking state.
-     * Returns the list of currently active detections from the tracked objects.
-     */
-    fun update(detections: List<Detection>): List<Detection> {
+    fun update(detections: List<Detection>, frameTimeNs: Long): List<Detection> {
         val unmatchedTracks = trackedObjects.toMutableList()
         val unmatchedDetections = detections.toMutableList()
         val matched = mutableListOf<Pair<TrackedObject, Detection>>()
-
-        // 1. Compute IOU between all tracks and detections
         val candidates = mutableListOf<Triple<TrackedObject, Detection, Float>>()
+        
         for (track in unmatchedTracks) {
             for (det in detections) {
-                // Only match objects of the same class
                 if (track.detection.classId == det.classId) {
                     val iouValue = boxIou(track.detection.bounds, det.bounds)
-                    if (iouValue > IOU_THRESHOLD) {
-                        candidates.add(Triple(track, det, iouValue))
-                    }
+                    if (iouValue > 0.25f) candidates.add(Triple(track, det, iouValue))
                 }
             }
         }
         
-        // 2. Greedy assignment starting from highest IOU
         candidates.sortByDescending { it.third }
-        
         val matchedTracks = mutableSetOf<Int>()
         val matchedDetections = mutableSetOf<Detection>()
         
         for (candidate in candidates) {
-            val track = candidate.first
-            val det = candidate.second
-            
+            val (track, det) = candidate
             if (track.id !in matchedTracks && det !in matchedDetections) {
                 matched.add(track to det)
                 matchedTracks.add(track.id)
@@ -143,98 +74,50 @@ class ObjectTracker {
                 unmatchedDetections.remove(det)
             }
         }
-
-        // 3. Update matched tracks with new detection data
-        for ((track, det) in matched) {
-            track.update(det)
-            // Update the detection's speed info based on tracking history
-            track.detection = track.detection.copy(speedInfo = calculateSpeed(track))
+        
+        for ((track, det) in matched) { 
+            track.update(det, frameTimeNs)
+            track.detection = track.detection.copy(speedInfo = calculateSpeed(track)) 
         }
-
-        // 4. Handle unmatched tracks (aging)
-        val tracksToRemove = mutableListOf<TrackedObject>()
-        for (track in unmatchedTracks) {
-            track.missedFrames++
-            if (track.missedFrames > MAX_MISSED_FRAMES) {
-                tracksToRemove.add(track)
-            }
+        
+        trackedObjects.removeAll { it.missedFrames++ > 60 }
+        
+        for (det in unmatchedDetections) { 
+            val nt = TrackedObject(det, nextId.getAndIncrement(), frameTimeNs)
+            nt.update(det, frameTimeNs)
+            trackedObjects.add(nt) 
         }
-        trackedObjects.removeAll(tracksToRemove)
-
-        // 5. Create new tracks for unmatched detections
-        for (det in unmatchedDetections) {
-            val newTrack = TrackedObject(det, nextId.getAndIncrement())
-            newTrack.update(det)
-            newTrack.detection = newTrack.detection.copy(speedInfo = calculateSpeed(newTrack))
-            trackedObjects.add(newTrack)
-        }
-
-        // 6. Return detections from active tracks (those seen recently and passing age threshold)
-        return trackedObjects.filter { 
-            (it.age >= MIN_AGE_FOR_DISPLAY && it.missedFrames <= 3) || (it.missedFrames == 0)
-        }.map { 
-            val extrapolated = it.getExtrapolatedBounds()
-            it.detection.copy(bounds = extrapolated)
-        }
+        
+        return trackedObjects.filter { (it.age >= 2 && it.missedFrames <= 3) || it.missedFrames == 0 }
+            .map { it.detection.copy(bounds = it.getExtrapolatedBounds(frameTimeNs)) }
     }
 
-    fun clear() {
+    fun clear() { 
         trackedObjects.clear()
-        nextId.set(1)
+        nextId.set(1) 
     }
 
-    /**
-     * Calculates the Intersection over Union (IOU) of two bounding boxes.
-     */
     private fun boxIou(a: RectF, b: RectF): Float {
         val iw = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0f)
         val ih = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0f)
         val inter = iw * ih
-        val union = (a.width() * a.height()) + (b.width() * b.height()) - inter
+        val union = a.width()*a.height() + b.width()*b.height() - inter
         return if (union <= 0f) 0f else inter / union
     }
 
-    /**
-     * Estimates speed and direction based on position history.
-     */
     private fun calculateSpeed(track: TrackedObject): SpeedInfo {
-        val positions = track.positionHistory
-        val timestamps = track.timestampHistory
-        
-        // Need at least a few points for a stable reading
-        if (positions.size < 3) return SpeedInfo()
-        
-        val dx = positions.last().first - positions.first().first
-        val dy = positions.last().second - positions.first().second
-        val dt = (timestamps.last() - timestamps.first()) / 1000f
-        
-        // Prevent division by zero or extremely high speeds from frame jitter
-        if (dt <= 0.1f) return track.detection.speedInfo
-        
-        val speedPxPerSec = sqrt(dx*dx + dy*dy) / dt
-        
-        val direction = when {
-            kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.5f -> {
-                if (dx > 0) "Right" else "Left"
-            }
-            kotlin.math.abs(dy) > kotlin.math.abs(dx) * 1.5f -> {
-                if (dy < 0) "Up" else "Down"
-            }
+        val p = track.positionHistory
+        val t = track.timestampHistory
+        if (p.size < 3) return SpeedInfo()
+        val dt = (t.last() - t.first()) / 1_000_000_000f
+        if (dt <= 0.05f) return track.detection.speedInfo
+        val speedPx = sqrt((p.last().first-p.first().first).let{it*it} + (p.last().second-p.first().second).let{it*it}) / dt
+        val dir = when {
+            kotlin.math.abs(p.last().first-p.first().first) > kotlin.math.abs(p.last().second-p.first().second)*1.5f -> if (p.last().first > p.first().first) "Right" else "Left"
+            kotlin.math.abs(p.last().second-p.first().second) > kotlin.math.abs(p.last().first-p.first().first)*1.5f -> if (p.last().second < p.first().second) "Up" else "Down"
             else -> "diagonal"
         }
-        
-        // Calibration factor: maps normalized pixel movement to approximate MPH
-        // 0.45 is a heuristic for typical traffic distance and focal length
-        val speedMs = speedPxPerSec * 0.45f 
-        val speedMph = speedMs * 2.23694f
-        
-        return SpeedInfo(
-            speedPxPerSec = speedPxPerSec,
-            speedMs = speedMs,
-            speedKmh = speedMs * 3.6f,
-            speedMph = speedMph,
-            speedMphDisplay = speedMph.toInt(),
-            direction = direction
-        )
+        val mph = speedPx * 0.45f * 2.23694f
+        return SpeedInfo(speedPx, speedPx*0.45f, speedPx*0.45f*3.6f, mph, mph.toInt(), dir)
     }
 }

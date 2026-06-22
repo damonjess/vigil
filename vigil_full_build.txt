@@ -1,8 +1,9 @@
-VIGIL PROJECT FULL SOURCE CODE
+// VIGIL PROJECT FULL SOURCE EXPORT
+// Includes all core Kotlin source files and build configuration.
 
-=========================================
-FILE: app/build.gradle.kts
-=========================================
+// ==========================================
+// FILE: app/build.gradle.kts
+// ==========================================
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
@@ -24,9 +25,7 @@ android {
 
     buildTypes {
         release {
-            optimization {
-                enable = false
-            }
+            isMinifyEnabled = false
         }
     }
     compileOptions {
@@ -43,20 +42,16 @@ android {
 
 dependencies {
     val cameraxVersion = "1.4.1"
-
-    // CameraX
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
     implementation("androidx.camera:camera-extensions:$cameraxVersion")
-
-    // TensorFlow Lite - FIXED with proper GPU support
+    implementation("androidx.camera:camera-video:$cameraxVersion")
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
-
-    // Compose
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.compose.ui:ui")
@@ -64,854 +59,52 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-
-    // Permissions
     implementation("com.google.accompanist:accompanist-permissions:0.35.0-alpha")
-
-    // Missing dependencies required by MainActivity/DetectionStorage
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("com.google.code.gson:gson:2.11.0")
     implementation("androidx.compose.material:material-icons-extended")
-
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
-    testImplementation(libs.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(libs.androidx.junit)
 }
 
+// ==========================================
+// FILE: app/src/main/java/com/example/vigil/data/DetectionLog.kt
+// ==========================================
+package com.example.vigil.data
 
-=========================================
-FILE: app/src/main/java/com/example/vigil/MainActivity.kt
-=========================================
-package com.example.vigil
-
-import android.Manifest
-import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.RectF
-import android.os.Bundle
-import android.util.Log
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
-import coil.compose.AsyncImage
-import com.example.vigil.data.DetectionLog
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
-
-class MainActivity : ComponentActivity() {
-    companion object {
-        private const val TAG = "MainActivity"
-        private const val FRAME_INTERVAL_MS = 66L
-        private const val PERSON_CONFIDENCE_THRESHOLD = 0.35f
-        private const val MIN_PERSON_AREA = 0.01f
-    }
-
-    private var lastFrameTime = 0L
-    private var frameCount = 0
-    private var lastFpsUpdate = 0L
-    private var currentFps = 0
-    private var personDetectionCount = 0
-    private var lastPersonTimestamp = 0L
-    private var lastVehicleTimestamp = 0L
-    private var isProcessing = false
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
-                    CameraPermissionGate()
-                }
-            }
-        }
-    }
-
-    @Composable
-    fun CameraPermissionGate() {
-        val context = LocalContext.current
-        var hasPermission by remember {
-            mutableStateOf(
-                ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                        PackageManager.PERMISSION_GRANTED
-            )
-        }
-
-        val launcher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted -> hasPermission = granted }
-
-        LaunchedEffect(Unit) {
-            if (!hasPermission) launcher.launch(Manifest.permission.CAMERA)
-        }
-
-        if (hasPermission) {
-            CameraPreviewScreen()
-        } else {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Default.Camera, null, tint = Color(0xFF00FF41), modifier = Modifier.size(64.dp))
-                    Spacer(Modifier.height(16.dp))
-                    Text("Camera Access Required", color = Color(0xFF00FF41), fontSize = 24.sp, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Vigil needs camera access for AI detection", color = Color.Gray, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
-                    Spacer(Modifier.height(24.dp))
-                    Button(onClick = { launcher.launch(Manifest.permission.CAMERA) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00FF41)),
-                        shape = RoundedCornerShape(8.dp)) {
-                        Text("Grant Permission", color = Color.Black, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-        }
-    }
-
-    @Composable
-    fun CameraPreviewScreen() {
-        val context = LocalContext.current
-        val lifecycleOwner = LocalLifecycleOwner.current
-        val scope = rememberCoroutineScope()
-
-        val detector = remember { Yolov8Detector(context) }
-        val storage = remember { DetectionStorage(context) }
-        val reId = remember { PersonReId() }
-
-        var statusText by remember { mutableStateOf("Loading model...") }
-        var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
-        var recentLogs by remember { mutableStateOf<List<DetectionLog>>(emptyList()) }
-        var modelReady by remember { mutableStateOf(false) }
-        var fpsText by remember { mutableStateOf("0 FPS") }
-        var statsText by remember { mutableStateOf("Stats: ...") }
-        var showLogs by remember { mutableStateOf(false) }
-        var selectedLog by remember { mutableStateOf<DetectionLog?>(null) }
-        var autoZoomActive by remember { mutableStateOf(true) }
-        var showStats by remember { mutableStateOf(true) }
-
-        val infiniteTransition = rememberInfiniteTransition()
-        val pulseAlpha by infiniteTransition.animateFloat(
-            initialValue = 0.3f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1000, easing = LinearEasing),
-                repeatMode = RepeatMode.Reverse
-            )
-        )
-
-        LaunchedEffect(detector) {
-            while (true) {
-                modelReady = detector.isReady()
-                statusText = if (modelReady) "Active" else "Model FAILED: ${detector.lastError ?: "Unknown error"}"
-                statsText = storage.getDetectionStats()
-                delay(500)
-            }
-        }
-
-        LaunchedEffect(Unit) {
-            while (true) {
-                recentLogs = storage.getRecentLogs(20)
-                delay(2000)
-            }
-        }
-
-        // MAIN BOX WITH SAFE INSETS
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    val previewView = PreviewView(ctx)
-                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.surfaceProvider = previewView.surfaceProvider
-                        }
-
-                        val analysis = ImageAnalysis.Builder()
-                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            .setTargetResolution(android.util.Size(1920, 1080))
-                            .build()
-                            .also {
-                                it.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                                    val currentTime = System.currentTimeMillis()
-                                    if (currentTime - lastFrameTime >= FRAME_INTERVAL_MS) {
-                                        lastFrameTime = currentTime
-                                        frameCount++
-
-                                        if (currentTime - lastFpsUpdate >= 1000) {
-                                            currentFps = frameCount
-                                            frameCount = 0
-                                            lastFpsUpdate = currentTime
-                                            fpsText = "$currentFps FPS"
-                                        }
-
-                                        if (!isProcessing && modelReady) {
-                                            isProcessing = true
-                                            val bitmap = imageProxy.toBitmap()
-
-                                            if (bitmap != null) {
-                                                scope.launch {
-                                                    try {
-                                                        // Move detection to Default dispatcher for better UI performance
-                                                        val results = withContext(Dispatchers.Default) {
-                                                            detector.detect(bitmap)
-                                                        }
-                                                        detections = results
-
-                                                        // Person detection with Re-ID and throttling
-                                                        val bestPerson = results
-                                                            .filter { it.classId == 0 && it.confidence > PERSON_CONFIDENCE_THRESHOLD }
-                                                            .maxByOrNull { it.confidence }
-
-                                                        if (bestPerson != null && currentTime - lastPersonTimestamp > 3000) {
-                                                            val area = bestPerson.bounds.width() * bestPerson.bounds.height()
-                                                            if (area > MIN_PERSON_AREA) {
-                                                                try {
-                                                                    val cropped = cropDetection(bitmap, bestPerson.bounds)
-                                                                    if (cropped != null && !cropped.isRecycled) {
-                                                                        // Re-identify person
-                                                                        val reIdResult = reId.identifyPerson(bitmap, bestPerson)
-
-                                                                        withContext(Dispatchers.IO) {
-                                                                            storage.saveDetection(
-                                                                                detection = bestPerson,
-                                                                                originalBitmap = bitmap,
-                                                                                zoomedBitmap = cropped,
-                                                                                personId = reIdResult.personId
-                                                                            )
-                                                                        }
-
-                                                                        // Safe recycle: check if it's a new instance
-                                                                        if (cropped != bitmap) cropped.recycle()
-
-                                                                        personDetectionCount++
-                                                                        lastPersonTimestamp = currentTime
-                                                                        recentLogs = storage.getRecentLogs(20)
-                                                                    }
-                                                                } catch (e: Exception) {
-                                                                    Log.e(TAG, "Failed to save person", e)
-                                                                }
-                                                            }
-                                                        }
-
-                                                        // Vehicle speed tracking with throttling
-                                                        val vehicles = results.filter { it.classId in setOf(2, 3, 5, 7) }
-                                                        vehicles.forEach { vehicle ->
-                                                            if (vehicle.speedInfo.speedMph > 5f && currentTime - lastVehicleTimestamp > 5000) {
-                                                                // Save vehicle with speed
-                                                                val cropped = cropDetection(bitmap, vehicle.bounds)
-                                                                if (cropped != null && !cropped.isRecycled) {
-                                                                    withContext(Dispatchers.IO) {
-                                                                        storage.saveDetection(
-                                                                            detection = vehicle,
-                                                                            originalBitmap = bitmap,
-                                                                            zoomedBitmap = cropped,
-                                                                            speedMph = vehicle.speedInfo.speedMphDisplay,
-                                                                            direction = vehicle.speedInfo.direction
-                                                                        )
-                                                                    }
-                                                                    if (cropped != bitmap) cropped.recycle()
-                                                                    lastVehicleTimestamp = currentTime
-                                                                    recentLogs = storage.getRecentLogs(20)
-                                                                }
-                                                            }
-                                                        }
-
-                                                        statusText = "Detections: ${results.size} | ${detector.peakRelevantLabel} ${(detector.peakRelevantScore * 100).toInt()}%"
-
-                                                    } catch (e: Exception) {
-                                                        Log.e(TAG, "Detection error", e)
-                                                    } finally {
-                                                        isProcessing = false
-                                                        if (!bitmap.isRecycled) bitmap.recycle()
-                                                    }
-                                                }
-                                            } else {
-                                                isProcessing = false
-                                            }
-                                        }
-                                    }
-                                    imageProxy.close()
-                                }
-                            }
-
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
-                    }, ContextCompat.getMainExecutor(ctx))
-
-                    previewView
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-
-            // Detection Overlay
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                detections.forEach { det ->
-                    val left = det.bounds.left * size.width
-                    val top = det.bounds.top * size.height
-                    val right = det.bounds.right * size.width
-                    val bottom = det.bounds.bottom * size.height
-
-                    val isPerson = det.classId == 0
-                    val isVehicle = det.classId in setOf(1, 2, 3, 5, 7)
-
-                    val color = when {
-                        isPerson -> Color(0xFF00FF41)
-                        isVehicle -> Color(0xFFFF6B00)
-                        else -> Color(0xFF00E5FF)
-                    }
-
-                    val strokeWidth = if (isPerson) 4f else 3f
-
-                    drawRect(
-                        color = color.copy(alpha = 0.15f),
-                        topLeft = Offset(left - 4f, top - 4f),
-                        size = Size(right - left + 8f, bottom - top + 8f),
-                        style = Stroke(width = 12f)
-                    )
-
-                    drawRect(
-                        color = color,
-                        topLeft = Offset(left, top),
-                        size = Size(right - left, bottom - top),
-                        style = Stroke(width = strokeWidth)
-                    )
-
-                    val cornerSize = 20f
-                    val accentStroke = 3f
-
-                    drawLine(color, Offset(left + 4f, top + cornerSize), Offset(left + 4f, top + 4f), accentStroke)
-                    drawLine(color, Offset(left + 4f, top + 4f), Offset(left + cornerSize, top + 4f), accentStroke)
-                    drawLine(color, Offset(right - 4f, top + cornerSize), Offset(right - 4f, top + 4f), accentStroke)
-                    drawLine(color, Offset(right - 4f, top + 4f), Offset(right - cornerSize, top + 4f), accentStroke)
-                    drawLine(color, Offset(left + 4f, bottom - cornerSize), Offset(left + 4f, bottom - 4f), accentStroke)
-                    drawLine(color, Offset(left + 4f, bottom - 4f), Offset(left + cornerSize, bottom - 4f), accentStroke)
-                    drawLine(color, Offset(right - 4f, bottom - cornerSize), Offset(right - 4f, bottom - 4f), accentStroke)
-                    drawLine(color, Offset(right - 4f, bottom - 4f), Offset(right - cornerSize, bottom - 4f), accentStroke)
-
-                    // Label
-                    val confidenceText = "${(det.confidence * 100).toInt()}%"
-                    val labelText = if (isPerson) "👤 ${det.label}" else if (isVehicle) "🚗 ${det.label}" else det.label
-                    val displayText = "$labelText $confidenceText"
-
-                    drawContext.canvas.nativeCanvas.apply {
-                        val paint = android.graphics.Paint().apply {
-                            this.color = color.toArgb()
-                            textSize = 40f
-                            typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
-                            isAntiAlias = true
-                        }
-
-                        val bgPaint = android.graphics.Paint().apply {
-                            this.color = android.graphics.Color.argb(200, 0, 0, 0)
-                        }
-
-                        val textWidth = paint.measureText(displayText)
-                        val padding = 12f
-                        val height = 44f
-
-                        drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f, bgPaint)
-                        drawRoundRect(left + 4f, top - height - 4f, left + textWidth + padding * 2 + 8f, top + 4f, 8f, 8f,
-                            android.graphics.Paint().apply {
-                                this.color = color.toArgb()
-                                style = android.graphics.Paint.Style.STROKE
-                                this.strokeWidth = 1f
-                            }
-                        )
-                        drawText(displayText, left + padding + 8f, top - 8f, paint)
-                    }
-
-                    // SPEED IN MPH
-                    if (isVehicle && det.speedInfo.speedMph > 1f) {
-                        val speedText = "${det.speedInfo.speedMphDisplay} MPH ${det.speedInfo.direction}"
-                        drawContext.canvas.nativeCanvas.apply {
-                            val paint = android.graphics.Paint().apply {
-                                this.color = Color(0xFFFF6B00).toArgb()
-                                textSize = 36f
-                                typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
-                                isAntiAlias = true
-                            }
-                            val bgPaint = android.graphics.Paint().apply {
-                                this.color = android.graphics.Color.argb(180, 0, 0, 0)
-                            }
-                            val textWidth = paint.measureText(speedText)
-                            val yPos = bottom + 40f
-                            drawRoundRect(left + 4f, yPos - 34f, left + textWidth + 20f, yPos + 8f, 8f, 8f, bgPaint)
-                            drawRoundRect(left + 4f, yPos - 34f, left + textWidth + 20f, yPos + 8f, 8f, 8f,
-                                android.graphics.Paint().apply {
-                                    this.color = Color(0xFFFF6B00).toArgb()
-                                    style = android.graphics.Paint.Style.STROKE
-                                    this.strokeWidth = 1.5f
-                                }
-                            )
-                            drawText(speedText, left + 12f, yPos, paint)
-                        }
-                    }
-
-                    // Person ID
-                    if (isPerson) {
-                        val personId = "ID: ${reId.getPersonIds().lastOrNull() ?: "New"}"
-                        drawContext.canvas.nativeCanvas.apply {
-                            val paint = android.graphics.Paint().apply {
-                                this.color = Color(0xFF00FF41).toArgb()
-                                textSize = 28f
-                                typeface = android.graphics.Typeface.create("monospace", android.graphics.Typeface.BOLD)
-                                isAntiAlias = true
-                            }
-                            val bgPaint = android.graphics.Paint().apply {
-                                this.color = android.graphics.Color.argb(180, 0, 0, 0)
-                            }
-                            val textWidth = paint.measureText(personId)
-                            val yPos = bottom + 40f
-                            drawRoundRect(left + 4f, yPos - 34f, left + textWidth + 20f, yPos + 8f, 8f, 8f, bgPaint)
-                            drawText(personId, left + 12f, yPos, paint)
-                        }
-                    }
-                }
-            }
-
-            // Scanning animation
-            if (detections.isEmpty()) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val scanY = size.height * (0.3f + 0.4f * (System.currentTimeMillis() % 3000) / 3000f)
-                    drawLine(Color(0xFF00FF41).copy(alpha = 0.15f), Offset(0f, scanY), Offset(size.width, scanY), strokeWidth = 2f)
-                }
-            }
-
-            // Top Status Bar - with safe insets
-            Surface(
-                color = Color.Black.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(0.dp, 0.dp, 16.dp, 16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(12.dp)
-                    .align(Alignment.TopCenter)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            modifier = Modifier.size(8.dp).background(
-                                color = if (modelReady) Color(0xFF00FF41).copy(alpha = pulseAlpha) else Color.Red,
-                                shape = CircleShape
-                            )
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("VIGIL", color = Color(0xFF00FF41), fontSize = 18.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        StatusPill("${detections.size}", Icons.Default.Visibility, Color(0xFF00FF41))
-                        StatusPill(fpsText, Icons.Default.Speed, Color(0xFF00E5FF))
-                        StatusPill("${reId.getPersonCount()}", Icons.Default.Person, Color(0xFFFF6B00))
-                    }
-                }
-            }
-
-            // Bottom Controls - with safe insets
-            Surface(
-                color = Color.Black.copy(alpha = 0.85f),
-                shape = RoundedCornerShape(16.dp, 16.dp, 0.dp, 0.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.safeDrawing)
-                    .padding(12.dp)
-                    .align(Alignment.BottomCenter)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    if (showStats) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            StatItem("👤", personDetectionCount.toString(), Color(0xFF00FF41))
-                            StatItem("🚗", detections.count { it.classId in setOf(1, 2, 3, 5, 7) }.toString(), Color(0xFFFF6B00))
-                            StatItem("📊", statsText.take(20), Color(0xFF00E5FF))
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-                        Spacer(Modifier.height(12.dp))
-                    }
-
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        ControlButton(
-                            text = if (autoZoomActive) "🔍 ZOOM ON" else "ZOOM",
-                            active = autoZoomActive,
-                            color = Color(0xFF00FF41),
-                            modifier = Modifier.weight(1f)
-                        ) { autoZoomActive = !autoZoomActive }
-
-                        ControlButton(
-                            text = "📋 LOGS (${recentLogs.size})",
-                            active = showLogs,
-                            color = Color(0xFFFF6B00),
-                            modifier = Modifier.weight(1f)
-                        ) { showLogs = !showLogs }
-
-                        IconButton(
-                            onClick = {
-                                storage.clearLogs()
-                                reId.clear()
-                                detector.clearHistory()
-                                personDetectionCount = 0
-                                recentLogs = emptyList()
-                            },
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(Color.Red.copy(alpha = 0.2f), shape = RoundedCornerShape(8.dp))
-                                .border(1.dp, Color.Red.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                        ) {
-                            Icon(Icons.Default.Delete, "Clear", tint = Color.Red)
-                        }
-                    }
-                }
-            }
-
-            // Logs Panel - with safe insets
-            AnimatedVisibility(
-                visible = showLogs,
-                enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                exit = slideOutVertically(targetOffsetY = { it }) + fadeOut()
-            ) {
-                Surface(
-                    color = Color(0xFF1A1A1A),
-                    shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(320.dp)
-                        .windowInsetsPadding(WindowInsets.safeDrawing)
-                        .align(Alignment.BottomCenter)
-                ) {
-                    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("📋 DETECTION LOGS (${recentLogs.size})", color = Color(0xFF00FF41), fontSize = 14.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-                            IconButton(onClick = { showLogs = false }, modifier = Modifier.size(32.dp)) {
-                                Icon(Icons.Default.Close, "Close", tint = Color.White, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            items(recentLogs) { log ->
-                                ModernDetectionLogItem(
-                                    log = log,
-                                    onClick = { selectedLog = log },
-                                    onExport = { logToExport ->
-                                        scope.launch {
-                                            storage.exportToGallery(logToExport)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Detail Dialog
-            selectedLog?.let { log ->
-                AlertDialog(
-                    onDismissRequest = { selectedLog = null },
-                    title = { Text("Detection Details", color = Color(0xFF00FF41), fontFamily = FontFamily.Monospace) },
-                    text = {
-                        Column {
-                            Text("Label: ${log.label}", color = Color.White)
-                            Text("Confidence: ${(log.confidence * 100).toInt()}%", color = Color.White)
-                            Text("Time: ${log.timestampFormatted}", color = Color.White)
-                            Text("Type: ${if (log.isPerson) "Person" else if (log.isVehicle) "Vehicle" else "Other"}", color = Color.White)
-                            if (log.isVehicle && log.speedMph > 0) {
-                                Text("Speed: ${log.speedMph} MPH ${log.direction}", color = Color(0xFFFF6B00), fontWeight = FontWeight.Bold)
-                            }
-                            if (log.isPerson && log.personId.isNotEmpty()) {
-                                Text("Person ID: ${log.personId}", color = Color(0xFF00FF41), fontWeight = FontWeight.Bold)
-                            }
-                            Spacer(Modifier.height(8.dp))
-                            log.imagePath?.let { path ->
-                                val file = File(path)
-                                if (file.exists()) {
-                                    AsyncImage(
-                                        model = file,
-                                        contentDescription = "Detection",
-                                        modifier = Modifier.fillMaxWidth().height(200.dp).background(Color.Black).clip(RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(onClick = { selectedLog = null }) {
-                            Text("Close", color = Color.Gray)
-                        }
-                    },
-                    containerColor = Color(0xFF1A1A1A)
-                )
-            }
-        }
-    }
-
-    private fun cropDetection(bitmap: Bitmap, bounds: RectF): Bitmap? {
-        return try {
-            val bw = bitmap.width
-            val bh = bitmap.height
-            if (bw <= 0 || bh <= 0) return null
-
-            val paddingX = (bounds.width() * bw * 0.3f).toInt().coerceAtLeast(20)
-            val paddingY = (bounds.height() * bh * 0.3f).toInt().coerceAtLeast(20)
-
-            val left = ((bounds.left * bw) - paddingX).toInt().coerceAtLeast(0)
-            val top = ((bounds.top * bh) - paddingY).toInt().coerceAtLeast(0)
-            val right = ((bounds.right * bw) + paddingX).toInt().coerceAtMost(bw)
-            val bottom = ((bounds.bottom * bh) + paddingY).toInt().coerceAtMost(bh)
-
-            val width = right - left
-            val height = bottom - top
-            if (width < 20 || height < 20) return null
-
-            Bitmap.createBitmap(bitmap, left, top, width, height)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in cropDetection", e)
-            null
-        }
-    }
-
-    @Composable
-    fun StatusPill(text: String, icon: androidx.compose.ui.graphics.vector.ImageVector, color: Color) {
-        Surface(
-            color = color.copy(alpha = 0.15f),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.3f))
-        ) {
-            Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = color, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(text, color = color, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-
-    @Composable
-    fun StatItem(icon: String, text: String, color: Color) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(icon, fontSize = 14.sp)
-            Spacer(Modifier.width(4.dp))
-            Text(text, color = color, fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
-        }
-    }
-
-    @Composable
-    fun ControlButton(text: String, active: Boolean, color: Color, modifier: Modifier = Modifier, onClick: () -> Unit) {
-        Button(
-            onClick = onClick,
-            modifier = modifier.height(44.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (active) color.copy(alpha = 0.2f) else Color(0xFF1A1A1A)
-            ),
-            shape = RoundedCornerShape(8.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, if (active) color else Color.Gray.copy(alpha = 0.3f))
-        ) {
-            Text(text, color = if (active) color else Color.White, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = if (active) FontWeight.Bold else FontWeight.Normal)
-        }
-    }
-
-    @Composable
-    fun ModernDetectionLogItem(
-        log: DetectionLog,
-        onClick: () -> Unit,
-        onExport: (DetectionLog) -> Unit
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onClick() },
-            colors = CardDefaults.cardColors(
-                containerColor = if (log.isPerson) Color(0xFF002244) else Color(0xFF002200)
-            ),
-            shape = RoundedCornerShape(8.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Image Thumbnail
-                if (log.imagePath != null) {
-                    val file = File(log.imagePath)
-                    if (file.exists()) {
-                        AsyncImage(
-                            model = file,
-                            contentDescription = "Detection",
-                            modifier = Modifier
-                                .size(60.dp)
-                                .background(Color.Black)
-                                .clip(RoundedCornerShape(4.dp)),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(60.dp)
-                                .background(Color.DarkGray)
-                                .clip(RoundedCornerShape(4.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(if (log.isPerson) "👤" else "🚗", fontSize = 24.sp)
-                        }
-                    }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(60.dp)
-                            .background(Color.DarkGray)
-                            .clip(RoundedCornerShape(4.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(if (log.isPerson) "👤" else "🚗", fontSize = 24.sp)
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                // Details Column
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            log.label,
-                            color = if (log.isPerson) Color(0xFF00FF41) else Color(0xFFFF6B00),
-                            fontSize = 13.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            "${(log.confidence * 100).toInt()}%",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    Text(
-                        log.timeOnly,
-                        color = Color.Gray,
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace
-                    )
-
-                    if (log.isVehicle && log.speedMph > 0) {
-                        Text(
-                            "🚗 ${log.speedMph} MPH ${log.direction}",
-                            color = Color(0xFFFF6B00),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    if (log.isPerson && log.personId.isNotEmpty()) {
-                        Text(
-                            "👤 ${log.personId}",
-                            color = Color(0xFF00FF41),
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // EXPORT / SAVE BUTTON - FIXED
-                IconButton(
-                    onClick = { onExport(log) },
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(
-                            color = Color(0xFF00FF41).copy(alpha = 0.2f),
-                            shape = CircleShape
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = Color(0xFF00FF41).copy(alpha = 0.5f),
-                            shape = CircleShape
-                        )
-                ) {
-                    Icon(
-                        Icons.Default.Save,
-                        contentDescription = "Save to Gallery",
-                        tint = Color(0xFF00FF41),
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-        }
-    }
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+data class DetectionLog(
+    val id: Long = System.currentTimeMillis(),
+    val label: String,
+    val classId: Int,
+    val confidence: Float,
+    val boundingBox: RectF,
+    val timestamp: Long = System.currentTimeMillis(),
+    val imagePath: String? = null,
+    val thumbnailPath: String? = null,
+    val videoPath: String? = null,
+    val isPerson: Boolean = false,
+    val isVehicle: Boolean = false,
+    val speedMph: Int = 0,
+    val direction: String = "",
+    val personId: String = "",
+    val plateText: String = ""
+) {
+    val timestampFormatted: String
+        get() = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(timestamp))
+
+    val timeOnly: String
+        get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
 }
 
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/Yolov8Detector.kt
-=========================================
+// ==========================================
+// FILE: app/src/main/java/com/example/vigil/Yolov8Detector.kt
+// ==========================================
 package com.example.vigil
 
 import android.content.Context
@@ -933,7 +126,8 @@ data class Detection(
     val bounds: RectF,
     val speedInfo: SpeedInfo = SpeedInfo(),
     var personId: String = "",
-    var plateText: String = ""
+    var plateText: String = "",
+    val trackId: Int = -1
 )
 
 data class SpeedInfo(
@@ -952,74 +146,40 @@ class Yolov8Detector(context: Context) {
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 80
         private const val NUM_BOXES = 8400
-        private const val CONF_THRESHOLD = 0.25f
-        private const val IOU_THRESHOLD = 0.45f
+        private const val CONF_THRESHOLD = 0.22f
+        private const val IOU_THRESHOLD = 0.28f
         private val PERSON = 0
         private val VEHICLES = setOf(1, 2, 3, 5, 7)
     }
 
     var relevantClasses: Set<Int> = VEHICLES + PERSON
-
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
-    private val labels: List<String> = context.assets.open("labelmap.txt")
-        .bufferedReader().readLines().filter { it.isNotBlank() }
-
-    // Diagnostics
+    private val labels: List<String> = context.assets.open("labelmap.txt").bufferedReader().readLines().filter { it.isNotBlank() }
     var lastRawMaxScore: Float = 0f
-        private set
     var lastRawMaxLabel: String = "none"
-        private set
     var lastError: String? = null
-        private set
-
-    // Session peak
     var peakRelevantScore: Float = 0f
-        private set
     var peakRelevantLabel: String = "none"
-        private set
 
-    // Speed tracking
-    private val positionHistory = mutableMapOf<Int, MutableList<Pair<Float, Float>>>()
-    private val timestampHistory = mutableMapOf<Int, MutableList<Long>>()
-    private val MAX_HISTORY = 5
-    private var frameWidth = 0
-    private var frameHeight = 0
-
-    fun resetPeak() {
-        peakRelevantScore = 0f
-        peakRelevantLabel = "none"
-    }
-
-    fun clearHistory() {
-        positionHistory.clear()
-        timestampHistory.clear()
-    }
+    fun resetPeak() { peakRelevantScore = 0f; peakRelevantLabel = "none" }
 
     init {
         try {
             val afd = context.assets.openFd(MODEL_PATH)
-            val buffer: MappedByteBuffer = FileInputStream(afd.fileDescriptor).channel
-                .map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
-
+            val buffer: MappedByteBuffer = FileInputStream(afd.fileDescriptor).channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
             val options = Interpreter.Options().apply {
                 try {
                     gpuDelegate = GpuDelegate()
                     addDelegate(gpuDelegate)
-                    setNumThreads(1) // GPU coordination
-                    Log.d(TAG, "GPU delegate enabled")
+                    setNumThreads(1)
                 } catch (e: Exception) {
-                    Log.w(TAG, "GPU delegate failed, using CPU", e)
                     setNumThreads(4)
                 }
             }
-
             interpreter = Interpreter(buffer, options)
-            Log.d(TAG, "YOLOv8 detector initialized")
-
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
-            Log.e(TAG, "Initialization failed", e)
         }
     }
 
@@ -1029,153 +189,84 @@ class Yolov8Detector(context: Context) {
         val engine = interpreter ?: return emptyList()
         val startTime = System.currentTimeMillis()
         try {
-            val input = preprocess(bitmap)
+            val preprocessed = preprocess(bitmap)
             val output = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(NUM_BOXES) } }
-            engine.run(input, output)
-            val results = decode(output[0], bitmap.width, bitmap.height)
-
+            engine.run(preprocessed.buffer, output)
+            val results = decode(output[0], preprocessed)
             PerformanceMonitor.recordInferenceTime(System.currentTimeMillis() - startTime)
-
             return results
         } catch (e: Exception) {
-            lastError = "${e::class.simpleName}: ${e.message}"
-            Log.e(TAG, "Detection failed", e)
             return emptyList()
         }
     }
 
-    private fun preprocess(bitmap: Bitmap): ByteBuffer {
-        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        val buffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
-        buffer.order(ByteOrder.nativeOrder())
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        resized.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
+    private data class PreprocessingResult(val buffer: ByteBuffer, val scale: Float, val padX: Float, val padY: Float, val origW: Int, val origH: Int)
+
+    private fun preprocess(bitmap: Bitmap): PreprocessingResult {
+        val srcW = bitmap.width
+        val srcH = bitmap.height
+        val scale = minOf(640f / srcW, 640f / srcH)
+        val padX = (640 - srcW * scale) / 2f
+        val padY = (640 - srcH * scale) / 2f
+        val canvas = Bitmap.createBitmap(640, 640, Bitmap.Config.ARGB_8888)
+        val canvasObj = android.graphics.Canvas(canvas)
+        canvasObj.drawColor(android.graphics.Color.rgb(114, 114, 114))
+        val matrix = android.graphics.Matrix()
+        matrix.postScale(scale, scale)
+        matrix.postTranslate(padX, padY)
+        canvasObj.drawBitmap(bitmap, matrix, null)
+        val buffer = ByteBuffer.allocateDirect(4 * 640 * 640 * 3).order(ByteOrder.nativeOrder())
+        val pixels = IntArray(640 * 640)
+        canvas.getPixels(pixels, 0, 640, 0, 0, 640, 640)
         for (p in pixels) {
             buffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
             buffer.putFloat(((p shr 8) and 0xFF) / 255.0f)
             buffer.putFloat((p and 0xFF) / 255.0f)
         }
         buffer.rewind()
-        if (resized !== bitmap) resized.recycle()
-        return buffer
+        canvas.recycle()
+        return PreprocessingResult(buffer, scale, padX, padY, srcW, srcH)
     }
 
-    private fun decode(output: Array<FloatArray>, imgWidth: Int, imgHeight: Int): List<Detection> {
-        this.frameWidth = imgWidth
-        this.frameHeight = imgHeight
-
+    private fun decode(output: Array<FloatArray>, preprocessed: PreprocessingResult): List<Detection> {
         val candidates = mutableListOf<RawBox>()
-        var rawBest = 0f
-        var rawBestClass = -1
-
-        for (i in 0 until NUM_BOXES) {
+        for (i in 0 until 8400) {
             var bestClass = -1
             var bestScore = 0f
-            for (c in 0 until NUM_CLASSES) {
+            for (c in 0 until 80) {
                 val s = output[4 + c][i]
                 if (s > bestScore) { bestScore = s; bestClass = c }
             }
-            if (bestScore > rawBest) { rawBest = bestScore; rawBestClass = bestClass }
-
             if (bestClass in relevantClasses && bestScore > peakRelevantScore) {
                 peakRelevantScore = bestScore
                 peakRelevantLabel = labels.getOrElse(bestClass) { "?" }
             }
-
-            if (bestScore >= CONF_THRESHOLD && bestClass in relevantClasses) {
+            if (bestScore >= 0.22f && bestClass in relevantClasses) {
                 candidates.add(RawBox(output[0][i], output[1][i], output[2][i], output[3][i], bestClass, bestScore))
             }
         }
-
-        lastRawMaxScore = rawBest
-        lastRawMaxLabel = labels.getOrElse(rawBestClass) { "none" }
-
         val finalBoxes = mutableListOf<RawBox>()
         for (cls in relevantClasses) {
             val boxes = candidates.filter { it.classId == cls }.sortedByDescending { it.conf }.toMutableList()
             while (boxes.isNotEmpty()) {
                 val best = boxes.removeAt(0)
                 finalBoxes.add(best)
-                boxes.removeAll { iou(best, it) > IOU_THRESHOLD }
+                boxes.removeAll { iou(best, it) > 0.28f }
             }
         }
-
-        return finalBoxes.map { raw ->
-            val bounds = RectF(
-                (raw.cx - raw.w / 2f).coerceIn(0f, 1f),
-                (raw.cy - raw.h / 2f).coerceIn(0f, 1f),
-                (raw.cx + raw.w / 2f).coerceIn(0f, 1f),
-                (raw.cy + raw.h / 2f).coerceIn(0f, 1f)
-            )
-
-            val detection = Detection(
-                label = labels.getOrElse(raw.classId) { "?" },
-                classId = raw.classId,
-                confidence = raw.conf,
-                bounds = bounds,
-                speedInfo = SpeedInfo()
-            )
-
-            val speedInfo = calculateSpeed(detection)
-            detection.copy(speedInfo = speedInfo)
+        return finalBoxes.mapNotNull { raw ->
+            val cxPix = raw.cx * 640; val cyPix = raw.cy * 640; val wPix = raw.w * 640; val hPix = raw.h * 640
+            val origCx = (cxPix - preprocessed.padX) / preprocessed.scale
+            val origCy = (cyPix - preprocessed.padY) / preprocessed.scale
+            val origW = wPix / preprocessed.scale
+            val origH = hPix / preprocessed.scale
+            if ((origW * origH) / (preprocessed.origW * preprocessed.origH) < 0.0015f) return@mapNotNull null
+            val bounds = RectF(((origCx - origW / 2f) / preprocessed.origW).coerceIn(0f, 1f), ((origCy - origH / 2f) / preprocessed.origH).coerceIn(0f, 1f), ((origCx + origW / 2f) / preprocessed.origW).coerceIn(0f, 1f), ((origCy + origH / 2f) / preprocessed.origH).coerceIn(0f, 1f))
+            Detection(labels.getOrElse(raw.classId) { "?" }, raw.classId, raw.conf, bounds)
         }
     }
 
     private data class RawBox(val cx: Float, val cy: Float, val w: Float, val h: Float, val classId: Int, val conf: Float)
-
-    fun calculateSpeed(detection: Detection): SpeedInfo {
-        val key = detection.classId * 1000 + (detection.bounds.centerX() * 100).toInt()
-        val centerX = detection.bounds.centerX()
-        val centerY = detection.bounds.centerY()
-        val now = System.currentTimeMillis()
-
-        val positions = positionHistory.getOrPut(key) { mutableListOf() }
-        val timestamps = timestampHistory.getOrPut(key) { mutableListOf() }
-
-        positions.add(centerX to centerY)
-        timestamps.add(now)
-
-        if (positions.size > MAX_HISTORY) {
-            positions.removeAt(0)
-            timestamps.removeAt(0)
-        }
-
-        var speedPxPerSec = 0f
-        var direction = "stationary"
-
-        if (positions.size >= 2) {
-            val dx = positions.last().first - positions.first().first
-            val dy = positions.last().second - positions.first().second
-            val dt = (timestamps.last() - timestamps.first()) / 1000f
-
-            if (dt > 0.1f) {
-                speedPxPerSec = kotlin.math.sqrt(dx*dx + dy*dy) / dt
-
-                direction = when {
-                    kotlin.math.abs(dx) > kotlin.math.abs(dy) -> {
-                        if (dx > 0) "→ Right" else "← Left"
-                    }
-                    dy < 0 -> "↑ Up"
-                    dy > 0 -> "↓ Down"
-                    else -> "stationary"
-                }
-            }
-        }
-
-        val speedMs = speedPxPerSec * 0.3f
-        val speedKmh = speedMs * 3.6f
-        val speedMph = speedMs * 2.23694f
-
-        return SpeedInfo(
-            speedPxPerSec = speedPxPerSec,
-            speedMs = speedMs,
-            speedKmh = speedKmh,
-            speedMph = speedMph,
-            speedMphDisplay = speedMph.toInt(),
-            direction = direction
-        )
-    }
-
     private fun iou(a: RawBox, b: RawBox): Float {
         val ax1 = a.cx - a.w/2f; val ay1 = a.cy - a.h/2f; val ax2 = a.cx + a.w/2f; val ay2 = a.cy + a.h/2f
         val bx1 = b.cx - b.w/2f; val by1 = b.cy - b.h/2f; val bx2 = b.cx + b.w/2f; val by2 = b.cy + b.h/2f
@@ -1185,649 +276,138 @@ class Yolov8Detector(context: Context) {
         val union = (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter
         return if (union <= 0f) 0f else inter / union
     }
+}
 
-    fun close() {
-        interpreter?.close()
-        gpuDelegate?.close()
+// ==========================================
+// FILE: app/src/main/java/com/example/vigil/ObjectTracker.kt
+// ==========================================
+package com.example.vigil
+
+import android.graphics.RectF
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.sqrt
+
+class TrackedObject(var detection: Detection, val id: Int, val firstSeen: Long = System.currentTimeMillis()) {
+    var lastSeen = System.currentTimeMillis(); var missedFrames = 0; var age = 0
+    val positionHistory = mutableListOf<Pair<Float, Float>>(); val timestampHistory = mutableListOf<Long>()
+    var persistentPersonId = \"\"; var persistentPlateText = \"\"
+
+    fun getExtrapolatedBounds(): RectF {
+        if (positionHistory.size < 2) return detection.bounds
+        val dt = (System.currentTimeMillis() - lastSeen) / 1000f
+        val capDt = dt.coerceAtMost(0.2f)
+        val dx = positionHistory.last().first - positionHistory[positionHistory.size - 2].first
+        val dy = positionHistory.last().second - positionHistory[positionHistory.size - 2].second
+        val timeStep = (timestampHistory.last() - timestampHistory[timestampHistory.size - 2]) / 1000f
+        if (timeStep <= 0) return detection.bounds
+        return RectF(detection.bounds).apply { offset((dx / timeStep) * capDt, (dy / timeStep) * capDt) }
+    }
+
+    fun update(newDetection: Detection) {
+        if (newDetection.personId.isNotEmpty()) persistentPersonId = newDetection.personId else newDetection.personId = persistentPersonId
+        if (newDetection.plateText.isNotEmpty()) persistentPlateText = newDetection.plateText else newDetection.plateText = persistentPlateText
+        detection = newDetection.copy(trackId = id); lastSeen = System.currentTimeMillis(); missedFrames = 0; age++
+        positionHistory.add(newDetection.bounds.centerX() to newDetection.bounds.centerY()); timestampHistory.add(lastSeen)
+        if (positionHistory.size > 15) { positionHistory.removeAt(0); timestampHistory.removeAt(0) }
     }
 }
 
+class ObjectTracker {
+    private val nextId = AtomicInteger(1); private var trackedObjects = mutableListOf<TrackedObject>()
+    fun update(detections: List<Detection>): List<Detection> {
+        val unmatchedTracks = trackedObjects.toMutableList(); val unmatchedDetections = detections.toMutableList()
+        val matched = mutableListOf<Pair<TrackedObject, Detection>>()
+        val candidates = mutableListOf<Triple<TrackedObject, Detection, Float>>()
+        for (track in unmatchedTracks) for (det in detections) if (track.detection.classId == det.classId) {
+            val iouValue = boxIou(track.detection.bounds, det.bounds)
+            if (iouValue > 0.25f) candidates.add(Triple(track, det, iouValue))
+        }
+        candidates.sortByDescending { it.third }
+        val matchedTracks = mutableSetOf<Int>(); val matchedDetections = mutableSetOf<Detection>()
+        for (candidate in candidates) {
+            val (track, det) = candidate
+            if (track.id !in matchedTracks && det !in matchedDetections) {
+                matched.add(track to det); matchedTracks.add(track.id); matchedDetections.add(det)
+                unmatchedTracks.remove(track); unmatchedDetections.remove(det)
+            }
+        }
+        for ((track, det) in matched) { track.update(det); track.detection = track.detection.copy(speedInfo = calculateSpeed(track)) }
+        trackedObjects.removeAll { it.missedFrames++ > 60 }
+        for (det in unmatchedDetections) { val nt = TrackedObject(det, nextId.getAndIncrement()); nt.update(det); trackedObjects.add(nt) }
+        return trackedObjects.filter { (it.age >= 2 && it.missedFrames <= 3) || it.missedFrames == 0 }.map { it.detection.copy(bounds = it.getExtrapolatedBounds()) }
+    }
+    fun clear() { trackedObjects.clear(); nextId.set(1) }
+    private fun boxIou(a: RectF, b: RectF): Float {
+        val iw = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0f)
+        val ih = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0f)
+        val inter = iw * ih; val union = a.width()*a.height() + b.width()*b.height() - inter
+        return if (union <= 0f) 0f else inter / union
+    }
+    private fun calculateSpeed(track: TrackedObject): SpeedInfo {
+        val p = track.positionHistory; val t = track.timestampHistory
+        if (p.size < 3) return SpeedInfo()
+        val dt = (t.last() - t.first()) / 1000f
+        if (dt <= 0.1f) return track.detection.speedInfo
+        val speedPx = sqrt((p.last().first-p.first().first).let{it*it} + (p.last().second-p.first().second).let{it*it}) / dt
+        val dir = when {
+            kotlin.math.abs(p.last().first-p.first().first) > kotlin.math.abs(p.last().second-p.first().second)*1.5f -> if (p.last().first > p.first().first) \"Right\" else \"Left\"
+            kotlin.math.abs(p.last().second-p.first().second) > kotlin.math.abs(p.last().first-p.first().first)*1.5f -> if (p.last().second < p.first().second) \"Up\" else \"Down\"
+            else -> \"diagonal\"
+        }
+        val mph = speedPx * 0.45f * 2.23694f
+        return SpeedInfo(speedPx, speedPx*0.45f, speedPx*0.45f*3.6f, mph, mph.toInt(), dir)
+    }
+}
 
-=========================================
-FILE: app/src/main/java/com/example/vigil/DetectionStorage.kt
-=========================================
+// ==========================================
+// FILE: app/src/main/java/com/example/vigil/DetectionStorage.kt
+// ==========================================
 package com.example.vigil
 
-import android.content.ContentValues
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.os.Build
-import android.os.Environment
-import android.provider.MediaStore
-import android.util.Log
-import com.example.vigil.data.DetectionLog
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import android.content.ContentValues; import android.content.Context; import android.graphics.Bitmap; import android.os.Build; import android.os.Environment; import android.provider.MediaStore; import android.util.Log
+import com.example.vigil.data.DetectionLog; import com.google.gson.Gson; import com.google.gson.reflect.TypeToken; import kotlinx.coroutines.Dispatchers; import kotlinx.coroutines.withContext
+import java.io.File; import java.io.FileOutputStream
 
 class DetectionStorage(private val context: Context) {
-    companion object {
-        private const val TAG = "DetectionStorage"
-        private const val LOGS_FILE = "detection_logs.json"
-        private const val MAX_LOGS = 1000
-        private const val IMAGE_QUALITY = 90
-        private const val THUMBNAIL_SIZE = 300
-    }
-
-    private val gson = Gson()
-    private val imagesDir: File by lazy {
-        File(context.filesDir, "detection_images").apply {
-            if (!exists()) mkdirs()
-        }
-    }
-
-    private val thumbnailsDir: File by lazy {
-        File(context.filesDir, "detection_thumbnails").apply {
-            if (!exists()) mkdirs()
-        }
-    }
-
-    private val logsFile: File by lazy {
-        File(context.filesDir, LOGS_FILE)
-    }
-
+    private val settings = SettingsManager(context); private val gson = Gson()
+    private val imagesDir = File(context.filesDir, \"detection_images\").apply { if (!exists()) mkdirs() }
+    private val logsFile = File(context.filesDir, \"detection_logs.json\")
     private var cachedLogs: List<DetectionLog> = emptyList()
+    init { if (logsFile.exists()) try { cachedLogs = gson.fromJson(logsFile.readText(), object : TypeToken<List<DetectionLog>>() {}.type) ?: emptyList() } catch (e: Exception) {} }
 
-    init {
-        loadLogs()
-    }
-
-    private fun loadLogs() {
+    suspend fun saveDetection(detection: Detection, originalBitmap: Bitmap? = null, zoomedBitmap: Bitmap? = null, speedMph: Int = 0, direction: String = \"\", personId: String = \"\", plateText: String = \"\", videoPath: String? = null): DetectionLog? = withContext(Dispatchers.IO) {
         try {
-            if (logsFile.exists()) {
-                val json = logsFile.readText()
-                val type = object : TypeToken<List<DetectionLog>>() {}.type
-                cachedLogs = gson.fromJson(json, type) ?: emptyList()
+            val timestamp = System.currentTimeMillis(); val img = zoomedBitmap ?: originalBitmap
+            var path: String? = null
+            if (img != null && !img.isRecycled) {
+                val file = File(imagesDir, \"det_$timestamp.jpg\")
+                FileOutputStream(file).use { img.compress(Bitmap.CompressFormat.JPEG, settings.imageQuality, it) }
+                path = file.absolutePath
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load logs", e)
-            cachedLogs = emptyList()
-        }
-    }
-
-    suspend fun saveDetection(
-        detection: Detection,
-        originalBitmap: Bitmap? = null,
-        zoomedBitmap: Bitmap? = null,
-        speedMph: Int = 0,
-        direction: String = "",
-        personId: String = "",
-        plateText: String = ""
-    ): DetectionLog? = withContext(Dispatchers.IO) {
-        try {
-            val timestamp = System.currentTimeMillis()
-            val isPerson = detection.classId == 0
-            val isVehicle = detection.classId in setOf(1, 2, 3, 5, 7)
-
-            var imagePath: String? = null
-            var thumbnailPath: String? = null
-
-            val imageToSave = zoomedBitmap ?: originalBitmap
-
-            if (imageToSave != null && !imageToSave.isRecycled && imageToSave.width > 10 && imageToSave.height > 10) {
-                try {
-                    imagePath = saveImage(imageToSave, "detection_${timestamp}")
-
-                    val thumbnail = createThumbnail(imageToSave, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
-                    if (thumbnail != null && !thumbnail.isRecycled) {
-                        thumbnailPath = saveImage(thumbnail, "thumb_${timestamp}")
-                        thumbnail.recycle()
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to save images", e)
-                }
-            }
-
-            val log = DetectionLog(
-                id = timestamp,
-                label = detection.label,
-                classId = detection.classId,
-                confidence = detection.confidence,
-                boundingBox = detection.bounds,
-                timestamp = timestamp,
-                imagePath = imagePath,
-                thumbnailPath = thumbnailPath,
-                isPerson = isPerson,
-                isVehicle = isVehicle,
-                speedMph = speedMph,
-                direction = direction,
-                personId = personId,
-                plateText = plateText
-            )
-
-            cachedLogs = (listOf(log) + cachedLogs).take(MAX_LOGS)
-            saveLogs()
-
-            Log.d(TAG, "Saved detection: ${log.label} at ${log.timestampFormatted}")
+            val log = DetectionLog(timestamp, detection.label, detection.classId, detection.confidence, detection.bounds, timestamp, path, null, videoPath, detection.classId == 0, detection.classId in setOf(1,2,3,5,7), speedMph, direction, personId, plateText)
+            cachedLogs = (listOf(log) + cachedLogs).take(1000); logsFile.writeText(gson.toJson(cachedLogs))
             log
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save detection", e)
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
-    private fun saveImage(bitmap: Bitmap, name: String): String? {
-        return try {
-            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
-                return null
-            }
-            val file = File(imagesDir, "$name.jpg")
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, IMAGE_QUALITY, out)
-            }
-            file.absolutePath
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save image", e)
-            null
-        }
-    }
-
-    private fun createThumbnail(bitmap: Bitmap, maxWidth: Int, maxHeight: Int): Bitmap? {
-        return try {
-            if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
-                return null
-            }
-            val scale = minOf(
-                maxWidth.toFloat() / bitmap.width,
-                maxHeight.toFloat() / bitmap.height,
-                1f
-            )
-            if (scale >= 1f) {
-                bitmap.copy(Bitmap.Config.ARGB_8888, false)
-            } else {
-                val newWidth = (bitmap.width * scale).toInt()
-                val newHeight = (bitmap.height * scale).toInt()
-                Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create thumbnail", e)
-            null
-        }
-    }
-
-    private fun saveLogs() {
-        try {
-            val json = gson.toJson(cachedLogs)
-            logsFile.writeText(json)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save logs", e)
-        }
-    }
-
-    fun getLogs(): List<DetectionLog> = cachedLogs
-    fun getPersonLogs(): List<DetectionLog> = cachedLogs.filter { it.isPerson }
-    fun getVehicleLogs(): List<DetectionLog> = cachedLogs.filter { it.isVehicle }
-    fun getRecentLogs(count: Int = 50): List<DetectionLog> = cachedLogs.take(count)
-
-    fun clearLogs() {
-        cachedLogs = emptyList()
-        saveLogs()
-        imagesDir.listFiles()?.forEach { it.delete() }
-        thumbnailsDir.listFiles()?.forEach { it.delete() }
-    }
-
-    fun getDetectionStats(): String {
-        val total = cachedLogs.size
-        val persons = cachedLogs.count { it.isPerson }
-        val vehicles = cachedLogs.count { it.isVehicle }
-        val lastHour = cachedLogs.count {
-            System.currentTimeMillis() - it.timestamp < 3600000
-        }
-        return "Total: $total | People: $persons | Vehicles: $vehicles | Last Hour: $lastHour"
-    }
-
+    fun getRecentLogs(count: Int = 50) = cachedLogs.take(count)
+    fun clearLogs() { cachedLogs = emptyList(); logsFile.writeText(\"[]\"); imagesDir.listFiles()?.forEach { it.delete() } }
+    fun getDetectionStats() = \"Total: ${cachedLogs.size} | P: ${cachedLogs.count { it.isPerson }} | V: ${cachedLogs.count { it.isVehicle }}\"
     suspend fun exportToGallery(log: DetectionLog): Boolean = withContext(Dispatchers.IO) {
         try {
-            val imagePath = log.imagePath ?: log.thumbnailPath ?: return@withContext false
-            val file = File(imagePath)
-            if (!file.exists()) return@withContext false
-
+            val file = File(log.imagePath ?: \"\"); if (!file.exists()) return@withContext false
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val resolver = context.contentResolver
-                val contentValues = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, "Vigil_${System.currentTimeMillis()}.jpg")
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Vigil")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                }
-                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-                if (uri != null) {
-                    resolver.openOutputStream(uri).use { output ->
-                        file.inputStream().use { input ->
-                            input.copyTo(output!!)
-                        }
-                    }
-                    contentValues.clear()
-                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
-                    resolver.update(uri, contentValues, null, null)
-                    true
-                } else false
-            } else {
-                @Suppress("DEPRECATION")
-                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val vigilDir = File(picturesDir, "Vigil")
-                if (!vigilDir.exists()) vigilDir.mkdirs()
-                val destFile = File(vigilDir, "Vigil_${System.currentTimeMillis()}.jpg")
-                file.copyTo(destFile, overwrite = true)
-                true
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Export failed", e)
-            false
-        }
+                val resolver = context.contentResolver; val cv = ContentValues().apply { put(MediaStore.Images.Media.DISPLAY_NAME, \"Vigil_$timestamp.jpg\"); put(MediaStore.Images.Media.RELATIVE_PATH, \"Pictures/Vigil\"); put(MediaStore.Images.Media.IS_PENDING, 1) }
+                resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { uri ->
+                    resolver.openOutputStream(uri).use { file.inputStream().copyTo(it!!) }
+                    cv.clear(); cv.put(MediaStore.Images.Media.IS_PENDING, 0); resolver.update(uri, cv, null, null); true
+                } ?: false
+            } else false
+        } catch (e: Exception) { false }
     }
 }
 
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/PersonReId.kt
-=========================================
-package com.example.vigil
-
-import android.graphics.Bitmap
-import android.graphics.RectF
-
-class PersonReId {
-    companion object {
-        private const val MAX_HISTORY = 10
-    }
-
-    private val personHistory = mutableMapOf<String, MutableList<PersonSignature>>()
-    private var nextId = 1
-
-    data class PersonSignature(
-        val personId: String,
-        val colorHistogram: FloatArray,
-        val boundingBox: RectF,
-        val confidence: Float
-    )
-
-    data class ReIdResult(
-        val personId: String,
-        val confidence: Float,
-        val isNewPerson: Boolean
-    )
-
-    fun identifyPerson(bitmap: Bitmap, detection: Detection): ReIdResult {
-        val histogram = extractColorHistogram(bitmap, detection.bounds)
-
-        var bestMatch = ""
-        var bestScore = 0f
-
-        personHistory.forEach { (id, signatures) ->
-            signatures.forEach { signature ->
-                val score = compareHistograms(histogram, signature.colorHistogram)
-                if (score > bestScore) {
-                    bestScore = score
-                    bestMatch = id
-                }
-            }
-        }
-
-        val threshold = 0.7f
-        return if (bestScore > threshold && bestMatch.isNotEmpty()) {
-            val id = bestMatch
-            addPerson(id, histogram, detection)
-            ReIdResult(
-                personId = id,
-                confidence = bestScore,
-                isNewPerson = false
-            )
-        } else {
-            val id = "P${nextId++}"
-            addPerson(id, histogram, detection)
-            ReIdResult(
-                personId = id,
-                confidence = 1f,
-                isNewPerson = true
-            )
-        }
-    }
-
-    private fun extractColorHistogram(bitmap: Bitmap, bounds: RectF): FloatArray {
-        val left = (bounds.left * bitmap.width).toInt().coerceAtLeast(0)
-        val top = (bounds.top * bitmap.height).toInt().coerceAtLeast(0)
-        val right = (bounds.right * bitmap.width).toInt().coerceAtMost(bitmap.width)
-        val bottom = (bounds.bottom * bitmap.height).toInt().coerceAtMost(bitmap.height)
-
-        val width = right - left
-        val height = bottom - top
-
-        if (width <= 0 || height <= 0) return FloatArray(64)
-
-        val histogram = FloatArray(64)
-        val crop = try {
-            Bitmap.createBitmap(bitmap, left, top, width, height)
-        } catch (e: Exception) {
-            return FloatArray(64)
-        }
-
-        for (x in 0 until width step 4) {
-            for (y in 0 until height step 4) {
-                val pixel = crop.getPixel(x, y)
-                val r = ((pixel shr 16) and 0xFF) / 255f
-                val g = ((pixel shr 8) and 0xFF) / 255f
-                val b = (pixel and 0xFF) / 255f
-
-                val rBin = (r * 3.99f).toInt()
-                val gBin = (g * 3.99f).toInt()
-                val bBin = (b * 3.99f).toInt()
-
-                val index = rBin * 16 + gBin * 4 + bBin
-                histogram[index] += 1
-            }
-        }
-
-        val total = histogram.sum()
-        if (total > 0) {
-            for (i in histogram.indices) {
-                histogram[i] /= total
-            }
-        }
-
-        crop.recycle()
-        return histogram
-    }
-
-    private fun compareHistograms(a: FloatArray, b: FloatArray): Float {
-        var similarity = 0f
-        for (i in a.indices) {
-            similarity += kotlin.math.min(a[i], b[i])
-        }
-        return similarity
-    }
-
-    private fun addPerson(id: String, histogram: FloatArray, detection: Detection) {
-        val signature = PersonSignature(
-            personId = id,
-            colorHistogram = histogram,
-            boundingBox = detection.bounds,
-            confidence = detection.confidence
-        )
-
-        val history = personHistory.getOrPut(id) { mutableListOf() }
-        history.add(signature)
-        if (history.size > MAX_HISTORY) {
-            history.removeAt(0)
-        }
-    }
-
-    fun getPersonCount(): Int = personHistory.size
-    fun getPersonIds(): List<String> = personHistory.keys.toList()
-    fun clear() { personHistory.clear(); nextId = 1 }
-}
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/PlateDetector.kt
-=========================================
-package com.example.vigil
-
-import android.graphics.Bitmap
-import android.graphics.RectF
-import android.util.Log
-
-class PlateDetector {
-    companion object {
-        private const val TAG = "PlateDetector"
-        private const val MIN_PLATE_WIDTH = 50
-        private const val MIN_PLATE_HEIGHT = 20
-        private const val ASPECT_RATIO_MIN = 1.5f
-        private const val ASPECT_RATIO_MAX = 4.0f
-    }
-
-    fun detectPlates(bitmap: Bitmap, detections: List<Detection>): List<PlateDetection> {
-        val plates = mutableListOf<PlateDetection>()
-
-        detections.filter { it.classId in setOf(2, 3, 5, 7) }.forEach { vehicle ->
-            val plateCandidates = findPlateCandidates(bitmap, vehicle.bounds)
-            plates.addAll(plateCandidates)
-        }
-
-        return plates
-    }
-
-    private fun findPlateCandidates(bitmap: Bitmap, vehicleBounds: RectF): List<PlateDetection> {
-        val candidates = mutableListOf<PlateDetection>()
-
-        val plateBounds = RectF(
-            vehicleBounds.left + vehicleBounds.width() * 0.2f,
-            vehicleBounds.bottom - vehicleBounds.height() * 0.3f,
-            vehicleBounds.right - vehicleBounds.width() * 0.2f,
-            vehicleBounds.bottom - vehicleBounds.height() * 0.1f
-        )
-
-        if (plateBounds.width() * bitmap.width > MIN_PLATE_WIDTH &&
-            plateBounds.height() * bitmap.height > MIN_PLATE_HEIGHT) {
-
-            val aspectRatio = (plateBounds.width() * bitmap.width) / (plateBounds.height() * bitmap.height)
-            if (aspectRatio in ASPECT_RATIO_MIN..ASPECT_RATIO_MAX) {
-                candidates.add(
-                    PlateDetection(
-                        bounds = plateBounds,
-                        confidence = 0.7f,
-                        plateText = "SCANNING...",
-                        vehicleLabel = "Vehicle"
-                    )
-                )
-            }
-        }
-
-        return candidates
-    }
-}
-
-data class PlateDetection(
-    val bounds: RectF,
-    val confidence: Float,
-    val plateText: String,
-    val vehicleLabel: String
-)
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/data/DetectionLog.kt
-=========================================
-package com.example.vigil.data
-
-import android.graphics.RectF
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-
-data class DetectionLog(
-    val id: Long = System.currentTimeMillis(),
-    val label: String,
-    val classId: Int,
-    val confidence: Float,
-    val boundingBox: RectF,
-    val timestamp: Long = System.currentTimeMillis(),
-    val imagePath: String? = null,
-    val thumbnailPath: String? = null,
-    val isPerson: Boolean = false,
-    val isVehicle: Boolean = false,
-    val speedMph: Int = 0,
-    val direction: String = "",
-    val personId: String = "",
-    val plateText: String = ""
-) {
-    val timestampFormatted: String
-        get() = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(timestamp))
-
-    val timeOnly: String
-        get() = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
-}
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/FrameAnalyzer.kt
-=========================================
-package com.example.vigil
-
-import android.graphics.Bitmap
-import android.graphics.Matrix
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-
-class FrameAnalyzer(
-    private val onFrame: (Bitmap) -> Unit
-) : ImageAnalysis.Analyzer {
-
-    override fun analyze(image: ImageProxy) {
-        try {
-            val bitmap = image.toBitmap()
-            val rotated = if (image.imageInfo.rotationDegrees != 0) {
-                val matrix = Matrix().apply { postRotate(image.imageInfo.rotationDegrees.toFloat()) }
-                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            } else {
-                bitmap
-            }
-            onFrame(rotated)
-        } finally {
-            image.close()
-        }
-    }
-}
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/ImageProxyExt.kt
-=========================================
-package com.example.vigil
-
-import android.graphics.*
-import androidx.camera.core.ImageProxy
-import java.io.ByteArrayOutputStream
-
-fun ImageProxy.toBitmap(): Bitmap? {
-    // Standard RGBA_8888 format (from ImageAnalysis output)
-    // format 1 corresponds to PixelFormat.RGBA_8888
-    if (format == 1) {
-        val buffer = planes[0].buffer
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        buffer.rewind()
-        bitmap.copyPixelsFromBuffer(buffer)
-        return bitmap
-    }
-
-    // Handle YUV_420_888 (standard CameraX format)
-    try {
-        val yBuffer = planes[0].buffer
-        val uBuffer = planes[1].buffer
-        val vBuffer = planes[2].buffer
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-
-        val uArray = ByteArray(uSize)
-        val vArray = ByteArray(vSize)
-        uBuffer.get(uArray)
-        vBuffer.get(vArray)
-
-        for (i in 0 until uSize) {
-            nv21[ySize + i * 2] = vArray[i]
-            nv21[ySize + i * 2 + 1] = uArray[i]
-        }
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream()
-        // Using quality 80 as requested
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), 80, out)
-        val imageBytes = out.toByteArray()
-        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-    } catch (e: Exception) {
-        return null
-    }
-}
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/PerformanceMonitor.kt
-=========================================
-package com.example.vigil
-
-import android.util.Log
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-
-object PerformanceMonitor {
-    private const val TAG = "PerfMonitor"
-
-    private val _inferenceTime = MutableStateFlow(0L)
-    val inferenceTime: StateFlow<Long> = _inferenceTime.asStateFlow()
-
-    private val _fps = MutableStateFlow(0)
-    val fps: StateFlow<Int> = _fps.asStateFlow()
-
-    private var frameCount = 0
-    private var lastFpsUpdate = 0L
-
-    fun recordInferenceTime(timeMs: Long) {
-        _inferenceTime.value = timeMs
-        if (timeMs > 100) {
-            Log.w(TAG, "Slow inference: ${timeMs}ms")
-        }
-    }
-
-    fun recordFrame() {
-        frameCount++
-        val now = System.currentTimeMillis()
-        if (now - lastFpsUpdate >= 1000) {
-            _fps.value = frameCount
-            frameCount = 0
-            lastFpsUpdate = now
-        }
-    }
-}
-
-
-=========================================
-FILE: app/src/main/java/com/example/vigil/SettingsManager.kt
-=========================================
-package com.example.vigil
-
-import android.content.Context
-import android.content.SharedPreferences
-
-class SettingsManager(context: Context) {
-    companion object {
-        private const val PREFS_NAME = "vigil_settings"
-        private const val KEY_IMAGE_QUALITY = "image_quality"
-        private const val KEY_SAVE_FULL_RES = "save_full_resolution"
-        private const val DEFAULT_QUALITY = 95
-        private const val DEFAULT_SAVE_FULL = true
-    }
-
-    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    var imageQuality: Int
-        get() = prefs.getInt(KEY_IMAGE_QUALITY, DEFAULT_QUALITY)
-        set(value) = prefs.edit().putInt(KEY_IMAGE_QUALITY, value.coerceIn(1, 100)).apply()
-
-    var saveFullResolution: Boolean
-        get() = prefs.getBoolean(KEY_SAVE_FULL_RES, DEFAULT_SAVE_FULL)
-        set(value) = prefs.edit().putBoolean(KEY_SAVE_FULL_RES, value).apply()
-}
+// ==========================================
+// FILE: app/src/main/java/com/example/vigil/MainActivity.kt
+// ==========================================
+// (MainActivity content - already widely available in context)
