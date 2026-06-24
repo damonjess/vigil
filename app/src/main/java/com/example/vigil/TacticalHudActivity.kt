@@ -271,35 +271,50 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
         }
 
         // --- RETICLE SCOPE & CORNER RETICLE DRAWING LAYER ---
-        TargetTrackingReticleOverlay(detections = liveDetections, viewModel = viewModel)
+        if (viewModel.activeTab !in listOf("GPS TACTICAL MAP", "GPS TACTICAL")) {
+            TargetTrackingReticleOverlay(detections = liveDetections, viewModel = viewModel)
+        }
 
         // --- TELEMETRY HUD OVERLAYS (TOP PODS) ---
-        Row(modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp)
-            .windowInsetsPadding(WindowInsets.safeDrawing), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(modifier = Modifier
-                .background(Color(0xCC010A08))
-                .border(0.5.dp, Color(0xFF00FFCC))
-                .padding(8.dp)) {
-                Text("SYSTEM STATUS: SCAN ACTIVE", color = Color(0xFF00FFCC), fontSize = 10.sp)
-                Text("TRACKER POOL SIZE: ${liveDetections.size}", color = Color.Yellow, fontSize = 10.sp)
-            }
+        if (viewModel.activeTab !in listOf("GPS TACTICAL MAP", "GPS TACTICAL")) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .windowInsetsPadding(WindowInsets.safeDrawing),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(
+                    modifier = Modifier
+                        .background(Color(0xCC010A08))
+                        .border(0.5.dp, Color(0xFF00FFCC))
+                        .padding(8.dp)
+                ) {
+                    Text("SYSTEM STATUS: SCAN ACTIVE", color = Color(0xFF00FFCC), fontSize = 10.sp)
+                    Text(
+                        "TRACKER POOL SIZE: ${liveDetections.size}",
+                        color = Color.Yellow,
+                        fontSize = 10.sp
+                    )
+                }
 
-            val priorityTarget = liveDetections.firstOrNull()
-            UpgradedTargetTrackingPod(
-                title = "PRIMARY LOCK VIEWER",
-                detection = priorityTarget,
-                parentFrameBitmap = currentFrame
-            )
+                val priorityTarget = liveDetections.firstOrNull()
+                UpgradedTargetTrackingPod(
+                    title = "PRIMARY LOCK VIEWER",
+                    detection = priorityTarget,
+                    parentFrameBitmap = currentFrame
+                )
+            }
         }
 
         // --- SIDE PODS ---
-        if (liveDetections.size > 1) {
-            Column(modifier = Modifier
-                .align(Alignment.CenterStart)
-                .padding(start = 16.dp)
-                .offset(y = (-40).dp)) {
+        if (viewModel.activeTab !in listOf("GPS TACTICAL MAP", "GPS TACTICAL") && liveDetections.size > 1) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 16.dp)
+                    .offset(y = (-40).dp)
+            ) {
                 liveDetections.drop(1).take(2).forEachIndexed { i, det ->
                     UpgradedTargetTrackingPod("TRACK-${i + 1}", det, currentFrame)
                     Spacer(Modifier.height(8.dp))
@@ -314,8 +329,8 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
             .background(Color(0xF0010706))
             .windowInsetsPadding(WindowInsets.safeDrawing)) {
 
-            // Console Logging Monitor Frame Container (hidden when tools drawer is active)
-            AnimatedVisibility(visible = !viewModel.isToolsOpen) {
+            // Console Logging Monitor Frame Container (hidden when tools drawer is active or on map tab)
+            AnimatedVisibility(visible = !viewModel.isToolsOpen && viewModel.activeTab !in listOf("GPS TACTICAL MAP", "GPS TACTICAL")) {
                 Column(modifier = Modifier
                     .fillMaxWidth()
                     .height(110.dp)
