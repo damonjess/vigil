@@ -24,6 +24,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -35,6 +36,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -60,7 +62,9 @@ import org.osmdroid.config.Configuration
 import com.mapzen.tangram.MapController
 import com.mapzen.tangram.MapView
 import com.mapzen.tangram.CameraPosition
+import androidx.compose.ui.text.font.FontWeight
 import com.mapzen.tangram.CameraUpdateFactory
+import com.example.vigil.data.DetectionLog
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -227,16 +231,19 @@ fun CameraFrameAnalysisEngine(
                                             }
 
                                             // Save detection to local storage
-                                            val croppedTarget = cropDetectionImage(bitmap, det.bounds, isPerson)
-                                            if (croppedTarget != null) {
-                                                storage.saveDetection(
-                                                    detection = det,
-                                                    originalBitmap = bitmap,
-                                                    zoomedBitmap = croppedTarget,
-                                                    speedMph = det.speedInfo.speedMph.toInt(),
-                                                    direction = det.speedInfo.direction,
-                                                    plateText = finalPlate
-                                                )
+                                            val area = det.bounds.width() * det.bounds.height()
+                                            if (area > 0.001f) { // MIN_PERSON_AREA threshold
+                                                val croppedTarget = cropDetectionImage(bitmap, det.bounds, isPerson)
+                                                if (croppedTarget != null) {
+                                                    storage.saveDetection(
+                                                        detection = det,
+                                                        originalBitmap = bitmap,
+                                                        zoomedBitmap = croppedTarget,
+                                                        speedMph = det.speedInfo.speedMph.toInt(),
+                                                        direction = det.speedInfo.direction,
+                                                        plateText = finalPlate
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -319,6 +326,16 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
     val tracker = remember { ObjectTracker() }
     val storage = remember { DetectionStorage(context) }
     val plateReader = remember { PlateOcrReader() }
+    val scope = rememberCoroutineScope()
+    var recentLogs by remember { mutableStateOf<List<DetectionLog>>(emptyList()) }
+
+    // Periodically update the recent logs from the database
+    LaunchedEffect(Unit) {
+        while (true) {
+            recentLogs = storage.getRecentLogs(20)
+            delay(2000)
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -443,6 +460,11 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
                 }
             }
 
+            // --- NEW: TARGET CAPTURE LOGS (PERSISTENT ENTITY LAYER) ---
+            if (viewModel.activeTab !in listOf("GPS TACTICAL MAP", "GPS TACTICAL") && !viewModel.isToolsOpen) {
+                DetectionLogDrawer(storage = storage, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp))
+            }
+
             // --- BOTTOM TAB BAR MATRIX ---
             Row(modifier = Modifier
                 .fillMaxWidth()
@@ -501,6 +523,74 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun DetectionLogDrawer(
+    storage: DetectionStorage,
+    modifier: Modifier = Modifier
+) {
+    var logs by remember { mutableStateOf<List<DetectionLog>>(emptyList()) }
+    
+    // Auto-refresh snapshot layers directly from your Room database instance
+    LaunchedEffect(Unit) {
+        while(true) {
+            logs = storage.getRecentLogs(30) // Pulls the latest person/vehicle target events
+            delay(1500)
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(220.dp)
+            .background(Color(0xFF121212))
+            .border(1.dp, Color(0x3300FF41))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1A1A1A))
+                .padding(8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("TARGET CAPTURE LOGS (PERSISTENT ENTITY LAYER)", color = Color(0xFF00FF41), fontSize = 10.sp)
+            Text("${logs.size} RECORDED", color = Color.White, fontSize = 10.sp)
+        }
+
+        LazyColumn(modifier = Modifier.fillMaxSize()) {
+            items(logs) { log ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .border(1.dp, Color(0x1AFFFFAA), RoundedCornerShape(4.dp))
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Left element: Label type badge
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "[${log.timeOnly}] ${log.label.uppercase()}", 
+                            color = if(log.isVehicle) Color(0xFFFF6B00) else Color(0xFF00FF41),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp
+                        )
+                        if (log.plateText.isNotEmpty()) {
+                            Text("ALPR TARGET: ${log.plateText}", color = Color(0xFF00E5FF), fontSize = 11.sp)
+                        }
+                    }
+                    
+                    // Right element: Confidence metrics
+                    Text(
+                        text = "CONF: ${(log.confidence * 100).toInt()}%", 
+                        color = Color.Gray, 
+                        fontSize = 11.sp
+                    )
                 }
             }
         }
@@ -590,6 +680,18 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     
+    // Radar Sweep Animation Logic
+    val infiniteTransition = rememberInfiniteTransition(label = "RadarEngine")
+    val sweepRadius by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 400f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "Sweep"
+    )
+
     // Remember MapView structure across recompositions
     val mapView = remember { MapView(context) }
     var mapController by remember { mutableStateOf<MapController?>(null) }
@@ -619,7 +721,34 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(modifier = Modifier.fillMaxSize().background(Color(0xFF010603))) {
+        // --- 1. RADAR VECTOR FALLBACK STRUCTURES ---
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            
+            // Draw localized concentric radar vector fallback structures
+            for (r in 1..4) {
+                drawCircle(
+                    color = Color(0x1A00FF41),
+                    radius = r * 150f,
+                    center = center,
+                    style = Stroke(width = 1.5f)
+                )
+            }
+            
+            // Sweeping vector line simulation
+            drawLine(
+                color = Color(0x4D00FF41),
+                start = center,
+                end = Offset(
+                    center.x + sweepRadius * cos(sweepRadius / 10f),
+                    center.y + sweepRadius * sin(sweepRadius / 10f)
+                ),
+                strokeWidth = 2f
+            )
+        }
+
+        // --- 2. OPEN-SOURCE 3D ENGINE VIEW ---
         AndroidView(
             factory = { _ ->
                 mapView.apply {
@@ -647,13 +776,14 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
             }
         )
 
-        // --- 2. HUD TEXT PARAMETER OVERLAY ---
+        // --- 3. HUD TEXT PARAMETER OVERLAY ---
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 25.dp, start = 20.dp, end = 20.dp)
         ) {
             Text("MINOS // TACTICAL MAP", color = Color(0xFF00FF44), fontSize = 17.sp, letterSpacing = 1.sp)
+            Text("STANDALONE VECTOR PERSISTENCE / LOCAL CACHE ACTIVE", color = Color(0xFF00FF41), fontSize = 11.sp)
             Text("GPS: LOCAL ENGAGED", color = Color(0xFF00FF44), fontSize = 13.sp)
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("TRAIL: 6", color = Color(0xFF00FF44), fontSize = 13.sp)
