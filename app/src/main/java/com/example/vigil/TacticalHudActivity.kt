@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -57,9 +59,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import org.osmdroid.config.Configuration
 import com.mapzen.tangram.MapController
 import com.mapzen.tangram.MapView
-import com.mapzen.tangram.LngLat
 import com.mapzen.tangram.CameraPosition
 import com.mapzen.tangram.CameraUpdateFactory
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -140,11 +142,14 @@ class TacticalHudActivity : ComponentActivity() {
 fun CameraFrameAnalysisEngine(
     detector: Yolov8Detector,
     tracker: ObjectTracker,
+    storage: DetectionStorage,
+    plateReader: PlateOcrReader,
     viewModel: TacticalStateViewModel
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val scope = rememberCoroutineScope()
 
     DisposableEffect(Unit) {
         onDispose {
@@ -198,6 +203,44 @@ fun CameraFrameAnalysisEngine(
                                 val results = detector.detect(bitmap, viewModel.aiConfidenceThreshold, 0.45f)
                                 val tracks = tracker.update(results, imageProxy.imageInfo.timestamp)
                                 viewModel.updatePipeline(bitmap, tracks)
+
+                                // --- RESTORED LOGGING & ALPR LAYER ENGINE ---
+                                tracks.forEach { det ->
+                                    val isVehicle = det.classId in setOf(1, 2, 3, 5, 7) // Car, truck, bus, motorcycle
+                                    val isPerson = det.classId == 0
+
+                                    if (isPerson || isVehicle) {
+                                        scope.launch {
+                                            var finalPlate = ""
+
+                                            // If it's a vehicle, process with PlateOcrReader
+                                            if (isVehicle) {
+                                                val croppedPlateRegion = cropPlateRegion(bitmap, det.bounds)
+                                                if (croppedPlateRegion != null) {
+                                                    val plate = plateReader.readPlate(bitmap, det.bounds)
+                                                    if (!plate.isNullOrEmpty()) {
+                                                        finalPlate = plate
+                                                        det.plateText = finalPlate
+                                                        viewModel.addLog("ALPR TARGET IDENTIFIED: [$finalPlate]")
+                                                    }
+                                                }
+                                            }
+
+                                            // Save detection to local storage
+                                            val croppedTarget = cropDetectionImage(bitmap, det.bounds, isPerson)
+                                            if (croppedTarget != null) {
+                                                storage.saveDetection(
+                                                    detection = det,
+                                                    originalBitmap = bitmap,
+                                                    zoomedBitmap = croppedTarget,
+                                                    speedMph = det.speedInfo.speedMph.toInt(),
+                                                    direction = det.speedInfo.direction,
+                                                    plateText = finalPlate
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             imageProxy.close()
                         }
@@ -215,6 +258,56 @@ fun CameraFrameAnalysisEngine(
     }
 }
 
+private fun cropDetectionImage(bitmap: Bitmap, bounds: RectF, isPerson: Boolean): Bitmap? {
+    val bw = bitmap.width
+    val bh = bitmap.height
+    val horizontalPaddingFactor = if (isPerson) 0.15f else 0.25f
+    val verticalPaddingFactor = if (isPerson) 0.10f else 0.20f
+
+    val paddingX = (bounds.width() * bw * horizontalPaddingFactor).toInt().coerceAtLeast(if (isPerson) 20 else 40)
+    val paddingY = (bounds.height() * bh * verticalPaddingFactor).toInt().coerceAtLeast(if (isPerson) 20 else 30)
+
+    val left = ((bounds.left * bw) - paddingX).toInt().coerceIn(0, bw - 1)
+    val top = ((bounds.top * bh) - paddingY).toInt().coerceIn(0, bh - 1)
+    val right = ((bounds.right * bw) + paddingX).toInt().coerceIn(left + 1, bw)
+    val bottom = ((bounds.bottom * bh) + paddingY).toInt().coerceIn(top + 1, bh)
+
+    val width = right - left
+    val height = bottom - top
+    if (width < 20 || height < 20) return null
+
+    return try {
+        Bitmap.createBitmap(bitmap, left, top, width, height)
+    } catch (e: Exception) {
+        null
+    }
+}
+
+private fun cropPlateRegion(bitmap: Bitmap, bounds: RectF): Bitmap? {
+    val bw = bitmap.width
+    val bh = bitmap.height
+    if (bw <= 0 || bh <= 0) return null
+
+    val left = (bounds.left + bounds.width() * 0.2f) * bw
+    val right = (bounds.right - bounds.width() * 0.2f) * bw
+    val top = (bounds.bottom - bounds.height() * 0.3f) * bh
+    val bottom = bounds.bottom * bh
+
+    val l = left.toInt().coerceIn(0, bw - 1)
+    val t = top.toInt().coerceIn(0, bh - 1)
+    val r = right.toInt().coerceIn(l + 1, bw)
+    val b = bottom.toInt().coerceIn(t + 1, bh)
+
+    val w = r - l
+    val h = b - t
+    if (w < 20 || h < 10) return null
+    return try {
+        Bitmap.createBitmap(bitmap, l, t, w, h)
+    } catch (e: Exception) {
+        null
+    }
+}
+
 @Composable
 fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
     val context = LocalContext.current
@@ -224,6 +317,8 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
 
     val detector = remember { Yolov8Detector(context) }
     val tracker = remember { ObjectTracker() }
+    val storage = remember { DetectionStorage(context) }
+    val plateReader = remember { PlateOcrReader() }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -236,6 +331,8 @@ fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
         CameraFrameAnalysisEngine(
             detector = detector,
             tracker = tracker,
+            storage = storage,
+            plateReader = plateReader,
             viewModel = viewModel
         )
 
@@ -489,39 +586,63 @@ fun TargetTrackingReticleOverlay(detections: List<Detection>, viewModel: Tactica
 }
 
 @Composable
-fun MapViewportMock(viewModel: TacticalStateViewModel = viewModel()) {
+fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    
+    // Remember MapView structure across recompositions
+    val mapView = remember { MapView(context) }
     var mapController by remember { mutableStateOf<MapController?>(null) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF010603))
-    ) {
-        // --- 1. OPEN-SOURCE REGISTRATION-FREE 3D ENGINE VIEW ---
+    // Synchronize full Android lifecycle hooks with the Compose UI lifecycle
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_CREATE -> mapView.onCreate(null)
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                Lifecycle.Event.ON_DESTROY -> mapView.onDestroy()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        
+        // Ensure it starts in resumed state if we are already resumed
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            mapView.onResume()
+        }
+
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            mapView.onPause()
+            mapView.onDestroy()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
-            factory = { context ->
-                MapView(context).apply {
+            factory = { _ ->
+                mapView.apply {
                     getMapAsync { controller ->
                         mapController = controller
-
-                        // Set up the tactical camera viewpoint matching your picture framing specs
+                        
+                        // Configure your initial tactical HUD camera stance
                         val cameraPosition = CameraPosition().apply {
                             longitude = -0.6521
                             latitude = 53.5889
                             zoom = viewModel.mapZoom
-                            tilt = 60f * (Math.PI.toFloat() / 180f)       // CRITICAL: True isometric perspective angle slope
-                            rotation = 15f * (Math.PI.toFloat() / 180f)     // Rotates map direction vectors for heads-up styling
+                            tilt = 60f * (Math.PI.toFloat() / 180f)
+                            rotation = 15f * (Math.PI.toFloat() / 180f)
                         }
                         controller?.updateCameraPosition(CameraUpdateFactory.newCameraPosition(cameraPosition))
-
-                        // Load a local matrix dark green configuration asset file
-                        // (You can style map colors down to raw line paths via this asset configuration)
+                        
+                        // Load the tactical scene file from assets
                         controller?.loadSceneFile("asset:///tactical_scene.yaml")
                     }
                 }
             },
             modifier = Modifier.fillMaxSize(),
-            update = { view ->
+            update = { _ ->
                 mapController?.updateCameraPosition(CameraUpdateFactory.setZoom(viewModel.mapZoom))
             }
         )

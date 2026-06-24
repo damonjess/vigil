@@ -1,21 +1,39 @@
+scene:
+  background:
+    color: '#010603'
+
 cameras:
-    tactical:
-        type: perspective
+  tactical:
+    type: perspective
+    active: true
 
 sources:
-    osm:
-        type: TopoJSON
-        url:  https://tile.nextzen.org/tilezen/vector/v1/all/{z}/{x}/{y}.topojson
+  osm:
+    type: MVT
+    url: https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf
 
 layers:
-    buildings:
-        data: { source: osm, layer: buildings }
-        draw:
-            polygons:
-                order: 30
-                color: [0.0, 1.0, 0.27, 0.3] # Semitransparent green building infills
-            lines:
-                order: 31
-                color: [0.0, 1.0, 0.27, 0.9] # Glowing green wireframe structural boundaries
-                width: 1.5px
-        extrude: true # Tells the open-source pipeline to extrude blocks into true 3D space
+  water:
+    data: { source: osm, layer: water }
+    draw:
+      polygons:
+        order: 1
+        color: '#002233'
+  roads:
+    data: { source: osm, layer: transportation }
+    draw:
+      lines:
+        order: 20
+        color: [0.0, 0.6, 0.3, 0.6]
+        width: 1.5px
+  buildings:
+    data: { source: osm, layer: building }
+    draw:
+      polygons:
+        order: 10
+        color: [0.0, 1.0, 0.25, 0.15]
+      lines:
+        order: 11
+        color: [0.0, 1.0, 0.25, 0.8]
+        width: 1.0px
+    extrude: true

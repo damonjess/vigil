@@ -76,4 +76,5 @@ dependencies {
     // Maps
     implementation("org.osmdroid:osmdroid-android:6.1.20")
     implementation("com.mapzen.tangram:tangram:0.17.1")
+    implementation("org.maplibre.gl:android-sdk:11.8.5")
 }
