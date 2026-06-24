@@ -1,361 +1,135 @@
 package com.example.vigil
 
 import android.Manifest
-import android.content.pm.PackageManager
+import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.RectF
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.Image
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.Dispatchers
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.isGranted
+import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import org.osmdroid.config.Configuration
+import com.mapzen.tangram.MapController
+import com.mapzen.tangram.MapView
+import com.mapzen.tangram.LngLat
+import com.mapzen.tangram.CameraPosition
+import com.mapzen.tangram.CameraUpdateFactory
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.coroutines.resume
+
+class TacticalStateViewModel : ViewModel() {
+    var activeTab by mutableStateOf("GEOLOG")
+    var isToolsOpen by mutableStateOf(false)
+    var aiConfidenceThreshold by mutableFloatStateOf(0.25f)
+    var radarSweepEnabled by mutableStateOf(true)
+    var cameraFacingFront by mutableStateOf(false)
+    var renderMode by mutableStateOf("TACTICAL")
+    var nightVisionMode by mutableStateOf("OFF")
+
+    var scannerSensitivity by mutableFloatStateOf(50f) // Ranges 1 to 100
+    var manualLockPoint by mutableStateOf<Offset?>(null)
+    var lockedTrackId by mutableIntStateOf(-1)
+
+    var mapZoom by mutableFloatStateOf(18f)
+    var show3DBuildings by mutableStateOf(true)
+    var mapTrailCount by mutableIntStateOf(6)
+
+    // Call this to clear manual target locks
+    fun clearManualLock() {
+        manualLockPoint = null
+        lockedTrackId = -1
+    }
+
+    private val _liveDetections = MutableStateFlow<List<Detection>>(emptyList())
+    val liveDetections: StateFlow<List<Detection>> = _liveDetections
+
+    private val _currentFrameBitmap = MutableStateFlow<Bitmap?>(null)
+    val currentFrameBitmap: StateFlow<Bitmap?> = _currentFrameBitmap
+
+    private val _consoleLogs = MutableStateFlow<List<String>>(listOf("VIGIL READY"))
+    val consoleLogs: StateFlow<List<String>> = _consoleLogs
+
+    fun updatePipeline(bitmap: Bitmap, detections: List<Detection>) {
+        _currentFrameBitmap.value = bitmap
+        _liveDetections.value = detections
+    }
+
+    fun addLog(message: String) {
+        val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        _consoleLogs.value = (listOf("[$time] $message") + _consoleLogs.value).take(15)
+    }
+}
 
 class TacticalHudActivity : ComponentActivity() {
+    @OptIn(ExperimentalPermissionsApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            TacticalScreenTheme {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF030908)) {
-                    CameraPermissionGate {
+            MaterialTheme {
+                val cameraPermissionState = rememberPermissionState(Manifest.permission.CAMERA)
+                LaunchedEffect(Unit) { cameraPermissionState.launchPermissionRequest() }
+
+                Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+                    if (cameraPermissionState.status.isGranted) {
                         TacticalMainLayout()
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun CameraPermissionGate(content: @Composable () -> Unit) {
-    val context = LocalContext.current
-    val permissions = arrayOf(Manifest.permission.CAMERA)
-    
-    var hasPermissions by remember {
-        mutableStateOf(permissions.all {
-            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-        })
-    }
-
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { results -> hasPermissions = results.values.all { it } }
-
-    LaunchedEffect(Unit) {
-        if (!hasPermissions) launcher.launch(permissions)
-    }
-
-    if (hasPermissions) {
-        content()
-    } else {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("CAMERA ACCESS REQUIRED", color = Color(0xFF00FFCC), fontSize = 18.sp)
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = { launcher.launch(permissions) }) {
-                    Text("GRANT")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun TacticalScreenTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        content = content
-    )
-}
-
-@Composable
-fun TacticalMainLayout() {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
-    
-    val detector = remember { Yolov8Detector(context) }
-    val tracker = remember { ObjectTracker() }
-    val smoother = remember { DetectionSmoother() }
-    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
-
-    var detections by remember { mutableStateOf<List<Detection>>(emptyList()) }
-    var currentBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var modelReady by remember { mutableStateOf(false) }
-    var activeTab by remember { mutableStateOf("GEOLOG PANEL") }
-    var isToolsOpen by remember { mutableStateOf(false) }
-
-    LaunchedEffect(detector) {
-        while (true) {
-            modelReady = detector.isReady()
-            delay(500)
-        }
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        
-        // 0. CAMERA PREVIEW LAYER
-        AndroidView(
-            factory = { ctx ->
-                val previewView = PreviewView(ctx)
-                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-
-                    val analysis = ImageAnalysis.Builder()
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                        .also {
-                            it.setAnalyzer(analysisExecutor) { imageProxy ->
-                                if (modelReady) {
-                                    val bitmap = imageProxy.toBitmap()
-                                    if (bitmap != null) {
-                                        scope.launch {
-                                            val results = detector.detect(bitmap)
-                                            val tracked = tracker.update(results, imageProxy.imageInfo.timestamp)
-                                            detections = smoother.update(tracked)
-                                            
-                                            withContext(Dispatchers.Main) {
-                                                val oldBitmap = currentBitmap
-                                                currentBitmap = bitmap
-                                                oldBitmap?.recycle()
-                                            }
-                                        }
-                                    }
-                                }
-                                imageProxy.close()
+                    } else {
+                        Box(contentAlignment = Alignment.Center) {
+                            Button(onClick = { cameraPermissionState.launchPermissionRequest() }) {
+                                Text("GRANT CAMERA ACCESS")
                             }
                         }
-
-                    cameraProvider.unbindAll()
-                    try {
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e("TacticalHud", "Binding failed", e)
                     }
-                }, ContextCompat.getMainExecutor(ctx))
-
-                previewView
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // 1. BACKGROUND RADAR GRID & GEOMETRIC TARGET LINES
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val center = Offset(size.width / 2f, size.height / 2f)
-            
-            // Central Scope Reticle Retainer
-            drawCircle(
-                color = Color(0xFF8B6425).copy(alpha = 0.5f),
-                radius = 280f,
-                center = center,
-                style = Stroke(width = 1.5f)
-            )
-            
-            // Crosshairs Center Target Point
-            drawLine(
-                color = Color(0xFF8B6425).copy(alpha = 0.5f),
-                start = Offset(center.x - 40, center.y),
-                end = Offset(center.x + 40, center.y),
-                strokeWidth = 2f
-            )
-            drawLine(
-                color = Color(0xFF8B6425).copy(alpha = 0.5f),
-                start = Offset(center.x, center.y - 40),
-                end = Offset(center.x, center.y + 40),
-                strokeWidth = 2f
-            )
-        }
-
-        // Target Reticles & Data Pods Overlay
-        TargetOverlayLayer(detections = detections, liveCameraBitmap = currentBitmap)
-
-        // 2. HUD OVERLAYS
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                // Top Left Telemetry Readout
-                Column(
-                    modifier = Modifier
-                        .background(Color(0x80030908))
-                        .border(1.dp, Color(0xFF00FFCC))
-                        .padding(8.dp)
-                ) {
-                    Text("SYSTEM STATUS: ${if(modelReady) "SCAN ACTIVE" else "LOADING..."}", color = Color(0xFF00FFCC), fontSize = 10.sp)
-                    Text("MATRIX INF: DEPLOYED [OK]", color = Color(0xFF00FFCC), fontSize = 10.sp)
-                    Text("FPS COMP: 60 // CACHE ACTIVE", color = Color(0xFF00FFCC), fontSize = 10.sp)
-                }
-
-                // Top Right Picture-In-Picture Target Lock Frame (Show best target)
-                val bestTarget = detections.maxByOrNull { it.confidence }
-                Column(
-                    modifier = Modifier
-                        .width(180.dp)
-                        .height(110.dp)
-                        .border(1.dp, Color(0xFF8B6425))
-                        .background(Color(0x228B6425))
-                        .padding(4.dp)
-                ) {
-                    Text("LOCK VIEWER / ${bestTarget?.label ?: "NO TARGET"}", color = Color(0xFF8B6425), fontSize = 9.sp)
-                    Spacer(modifier = Modifier.weight(1f))
-                    if (bestTarget != null) {
-                        Text("X${(bestTarget.bounds.centerX()*100).toInt()} Y${(bestTarget.bounds.centerY()*100).toInt()} // CONF: ${(bestTarget.confidence*100).toInt()}%", color = Color(0xFF8B6425), fontSize = 9.sp)
-                    } else {
-                        Text("SCANNING FOR TARGETS...", color = Color(0xFF8B6425), fontSize = 9.sp)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(40.dp))
-
-            // Dynamic Tracker Middle Row Pods (Show up to 2 tracks)
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                val targets = detections.filter { it.trackId != -1 }.take(2)
-                targets.forEach { det ->
-                    UpgradedTargetTrackingPod(title = "AUTO MAG-TRACK // TRACK-${det.trackId}", detection = det, parentFrameBitmap = currentBitmap)
-                }
-                repeat(2 - targets.size) {
-                    UpgradedTargetTrackingPod(title = "AUTO MAG-TRACK // SCANNING", detection = null, parentFrameBitmap = null)
-                }
-            }
-        }
-
-        // 3. RADAR COMPASS WIDGET
-        Box(
-            modifier = Modifier
-                .align(Alignment.CenterEnd)
-                .padding(end = 16.dp)
-                .size(80.dp)
-                .border(1.dp, Color(0xFF00FFCC))
-                .background(Color(0x80030908))
-        ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                drawCircle(color = Color(0xFF00FFCC).copy(alpha = 0.2f), radius = size.minDimension / 2, style = Stroke(1f))
-                detections.forEach { det ->
-                    val dx = (det.bounds.centerX() - 0.5f) * size.width * 0.8f
-                    val dy = (det.bounds.centerY() - 0.5f) * size.height * 0.8f
-                    drawCircle(Color(0xFF00FFCC), radius = 3f, center = Offset(size.width/2 + dx, size.height/2 + dy))
-                }
-            }
-            Text("RADAR", color = Color(0xFF00FFCC), fontSize = 8.sp, modifier = Modifier.align(Alignment.TopCenter))
-            Text("BLIPS: ${detections.size}", color = Color(0xFF00FFCC), fontSize = 8.sp, modifier = Modifier.align(Alignment.BottomCenter))
-        }
-
-        // 4. LOWER SCREEN BOTTOM PANELS
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .align(Alignment.BottomCenter)
-                .background(Color(0xDD030908))
-        ) {
-            
-            // Console Logging Container Area
-            AnimatedVisibility(visible = !isToolsOpen) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(100.dp)
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .border(1.dp, Color(0xFF00FFCC))
-                        .padding(8.dp)
-                ) {
-                    Text("VIGIL SCAN LOG // RECENT EVENTS", color = Color(0xFF00FFCC), fontSize = 10.sp)
-                    val logs = detections.take(3)
-                    LazyColumn {
-                        items(logs) { det ->
-                            Text("> ${det.label.uppercase()} IDENTIFIED IN SECTOR", color = Color.Green, fontSize = 9.sp)
-                        }
-                        if (logs.isEmpty()) {
-                            item { Text("> SEARCHING FOR TARGETS...", color = Color.Gray, fontSize = 9.sp) }
-                        }
-                    }
-                }
-            }
-
-            // 5. THE SCREEN SELECTION TACTICAL NAVIGATION FOOTER BAR
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(60.dp)
-                    .border(0.5.dp, Color(0xFF00FFCC)),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = { activeTab = "GEOLOG PANEL" },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    colors = ButtonDefaults.buttonColors(containerColor = if (activeTab == "GEOLOG PANEL") Color(0x3300FFCC) else Color.Transparent)
-                ) {
-                    Text("GEOLOG\nPANEL", color = Color.White, fontSize = 12.sp, maxLines = 2)
-                }
-
-                Button(
-                    onClick = { activeTab = "GPS TACTICAL MAP" },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    colors = ButtonDefaults.buttonColors(containerColor = if (activeTab == "GPS TACTICAL MAP") Color(0x3300FFCC) else Color.Transparent)
-                ) {
-                    Text("GPS\nTACTICAL MAP", color = Color.White, fontSize = 12.sp, maxLines = 2)
-                }
-
-                Button(
-                    onClick = { isToolsOpen = !isToolsOpen },
-                    modifier = Modifier.weight(1f).fillMaxHeight(),
-                    colors = ButtonDefaults.buttonColors(containerColor = if (isToolsOpen) Color(0x5500FFCC) else Color.Transparent)
-                ) {
-                    Text(if (isToolsOpen) "TOOLS\nCLOSE" else "TOOLS\nOPEN", color = Color.White, fontSize = 12.sp, maxLines = 2)
-                }
-            }
-
-            // 6. TOOLS PANEL (Abbreviated for fix)
-            AnimatedVisibility(visible = isToolsOpen) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 300.dp)
-                        .background(Color(0xFF020E0C))
-                        .border(1.dp, Color(0xFF00FFCC))
-                        .padding(16.dp)
-                ) {
-                    Text("TACTICAL SETTINGS", color = Color(0xFFFF9900), fontSize = 12.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Text("MODEL STATUS: ${if(modelReady) "READY" else "WAITING"}", color = Color.White, fontSize = 10.sp)
-                    // ... other settings ...
                 }
             }
         }
@@ -363,46 +137,259 @@ fun TacticalMainLayout() {
 }
 
 @Composable
-fun TargetOverlayLayer(detections: List<Detection>, liveCameraBitmap: Bitmap?) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        detections.forEach { detection ->
-            // Draw tactical sci-fi corners around each detected item
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val left = detection.bounds.left * size.width
-                val top = detection.bounds.top * size.height
-                val right = detection.bounds.right * size.width
-                val bottom = detection.bounds.bottom * size.height
-                val width = right - left
-                val height = bottom - top
-                
-                val cornerLength = minOf(width, height) * 0.25f
-                val tacticalColor = Color(0xFF00FFCC)
+fun CameraFrameAnalysisEngine(
+    detector: Yolov8Detector,
+    tracker: ObjectTracker,
+    viewModel: TacticalStateViewModel
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-                // Top-Left Reticle Corner
-                drawLine(tacticalColor, Offset(left, top), Offset(left + cornerLength, top), strokeWidth = 3f)
-                drawLine(tacticalColor, Offset(left, top), Offset(left, top + cornerLength), strokeWidth = 3f)
-                
-                // Bottom-Right Reticle Corner
-                drawLine(tacticalColor, Offset(right, bottom), Offset(right - cornerLength, bottom), strokeWidth = 3f)
-                drawLine(tacticalColor, Offset(right, bottom), Offset(right, bottom - cornerLength), strokeWidth = 3f)
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraExecutor.shutdown()
+        }
+    }
+
+    key(viewModel.cameraFacingFront) {
+        AndroidView(
+            factory = { ctx ->
+                PreviewView(ctx).apply {
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                    cameraProviderFuture.addListener({
+                        val cameraProvider = cameraProviderFuture.get()
+                        cameraProvider.unbindAll()
+
+                        val selector = if (viewModel.cameraFacingFront) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+
+                        val preview = Preview.Builder().build().also {
+                            it.setSurfaceProvider(this.surfaceProvider)
+                        }
+
+                        val analysis = ImageAnalysis.Builder()
+                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .setResolutionSelector(
+                                androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                                    .setAspectRatioStrategy(
+                                        androidx.camera.core.resolutionselector.AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                                    )
+                                    .build()
+                            )
+                            .build()
+
+                        analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                            val rawBitmap = imageProxy.toBitmap()
+                            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+
+                            if (rawBitmap != null) {
+                                val bitmap = if (rotationDegrees != 0) {
+                                    val matrix = android.graphics.Matrix().apply {
+                                        postRotate(rotationDegrees.toFloat())
+                                    }
+                                    android.graphics.Bitmap.createBitmap(
+                                        rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true
+                                    ).also { if (it !== rawBitmap) rawBitmap.recycle() }
+                                } else {
+                                    rawBitmap
+                                }
+
+                                val results = detector.detect(bitmap, viewModel.aiConfidenceThreshold, 0.45f)
+                                val tracks = tracker.update(results, imageProxy.imageInfo.timestamp)
+                                viewModel.updatePipeline(bitmap, tracks)
+                            }
+                            imageProxy.close()
+                        }
+
+                        try {
+                            cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                        } catch (e: Exception) {
+                            Log.e("TacticalHud", "Bind fail", e)
+                        }
+                    }, ContextCompat.getMainExecutor(ctx))
+                }
+            },
+            modifier = Modifier.size(1.dp) // Maintain data pipeline without showing preview directly
+        )
+    }
+}
+
+@Composable
+fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
+    val context = LocalContext.current
+    val liveDetections by viewModel.liveDetections.collectAsState()
+    val currentFrame by viewModel.currentFrameBitmap.collectAsState()
+    val logs by viewModel.consoleLogs.collectAsState()
+
+    val detector = remember { Yolov8Detector(context) }
+    val tracker = remember { ObjectTracker() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            detector.close()
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // --- DATA PIPE CAMERA FRAME CAPTURE LOOP ---
+        CameraFrameAnalysisEngine(
+            detector = detector,
+            tracker = tracker,
+            viewModel = viewModel
+        )
+
+        // --- DYNAMIC CENTRAL VIEWPORT SWITCHER ---
+        when (viewModel.activeTab) {
+            "GPS TACTICAL MAP", "GPS TACTICAL" -> {
+                // Renders the live animated radar mapping system
+                MapViewportMock(viewModel = viewModel)
             }
-            
-            // Text Label Box tracking above the target bounding reticle
-            Box(
-                modifier = Modifier
-                    .offset(
-                        x = (detection.bounds.left * 360).dp, // Crude approximation, better would be using local density
-                        y = ((detection.bounds.top * 640) - 20).dp
+            else -> {
+                // Default: Render the live camera preview feed coming from the analyzer pipeline
+                if (currentFrame != null) {
+                    Image(
+                        bitmap = currentFrame!!.asImageBitmap(),
+                        contentDescription = "Background Matrix Viewport",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onTap = { tapOffset ->
+                                        val normalizedX = tapOffset.x / size.width
+                                        val normalizedY = tapOffset.y / size.height
+                                        viewModel.manualLockPoint = Offset(normalizedX, normalizedY)
+                                        viewModel.addLog("MANUAL TARGET ACQUIRED AT X: ${(normalizedX * 100).toInt()}% Y: ${(normalizedY * 100).toInt()}%")
+                                    }
+                                )
+                            },
+                        contentScale = ContentScale.Crop,
+                        alpha = if (viewModel.nightVisionMode != "OFF") 0.7f else 0.4f
                     )
-                    .background(Color(0xCC030908))
+                }
+            }
+        }
+
+        // --- RETICLE SCOPE & CORNER RETICLE DRAWING LAYER ---
+        TargetTrackingReticleOverlay(detections = liveDetections, viewModel = viewModel)
+
+        // --- TELEMETRY HUD OVERLAYS (TOP PODS) ---
+        Row(modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+            .windowInsetsPadding(WindowInsets.safeDrawing), horizontalArrangement = Arrangement.SpaceBetween) {
+            Column(modifier = Modifier
+                .background(Color(0xCC010A08))
+                .border(0.5.dp, Color(0xFF00FFCC))
+                .padding(8.dp)) {
+                Text("SYSTEM STATUS: SCAN ACTIVE", color = Color(0xFF00FFCC), fontSize = 10.sp)
+                Text("TRACKER POOL SIZE: ${liveDetections.size}", color = Color.Yellow, fontSize = 10.sp)
+            }
+
+            val priorityTarget = liveDetections.firstOrNull()
+            UpgradedTargetTrackingPod(
+                title = "PRIMARY LOCK VIEWER",
+                detection = priorityTarget,
+                parentFrameBitmap = currentFrame
+            )
+        }
+
+        // --- SIDE PODS ---
+        if (liveDetections.size > 1) {
+            Column(modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = 16.dp)
+                .offset(y = (-40).dp)) {
+                liveDetections.drop(1).take(2).forEachIndexed { i, det ->
+                    UpgradedTargetTrackingPod("TRACK-${i + 1}", det, currentFrame)
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+
+        // --- LOWER CONSOLE READOUT & CONTROLLERS BAR ---
+        Column(modifier = Modifier
+            .fillMaxWidth()
+            .align(Alignment.BottomCenter)
+            .background(Color(0xF0010706))
+            .windowInsetsPadding(WindowInsets.safeDrawing)) {
+
+            // Console Logging Monitor Frame Container (hidden when tools drawer is active)
+            AnimatedVisibility(visible = !viewModel.isToolsOpen) {
+                Column(modifier = Modifier
+                    .fillMaxWidth()
+                    .height(110.dp)
+                    .padding(8.dp)
                     .border(0.5.dp, Color(0xFF00FFCC))
-                    .padding(2.dp)
-            ) {
-                Text(
-                    text = "${detection.label.uppercase()} [ID-${detection.trackId}] ${(detection.confidence * 100).toInt()}%",
-                    color = Color(0xFF00FFCC),
-                    fontSize = 8.sp
-                )
+                    .padding(6.dp)) {
+                    Text("LOG OUTPUT MATRIX // ACTIVE TELEMETRY LOGS", color = Color(0xFF00FFCC), fontSize = 10.sp)
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(logs) { log ->
+                            Text(log, color = Color.Green, fontSize = 9.sp)
+                        }
+                    }
+                }
+            }
+
+            // --- BOTTOM TAB BAR MATRIX ---
+            Row(modifier = Modifier
+                .fillMaxWidth()
+                .height(55.dp)
+                .border(0.5.dp, Color(0xFF00FFCC)), verticalAlignment = Alignment.CenterVertically) {
+                // Button 1: Geolog Camera View
+                Box(modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (viewModel.activeTab == "GEOLOG PANEL") Color(0x3300FFCC) else Color.Transparent)
+                    .clickable { viewModel.activeTab = "GEOLOG PANEL" }, contentAlignment = Alignment.Center) {
+                    Text("GEOLOG PANEL", color = Color.White, fontSize = 11.sp)
+                }
+                // Button 2: GPS Radar View (Triggers MapViewportMock above)
+                Box(modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (viewModel.activeTab == "GPS TACTICAL MAP" || viewModel.activeTab == "GPS TACTICAL") Color(0x3300FFCC) else Color.Transparent)
+                    .clickable { viewModel.activeTab = "GPS TACTICAL MAP" }, contentAlignment = Alignment.Center) {
+                    Text("GPS TACTICAL MAP", color = Color.White, fontSize = 11.sp)
+                }
+                // Button 3: Tools Settings Sheet Overlay Toggle
+                Box(modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .background(if (viewModel.isToolsOpen) Color(0x5500FFCC) else Color.Transparent)
+                    .clickable { viewModel.isToolsOpen = !viewModel.isToolsOpen }, contentAlignment = Alignment.Center) {
+                    Text(if (viewModel.isToolsOpen) "TOOLS CLOSE" else "TOOLS OPEN", color = Color.Yellow, fontSize = 11.sp)
+                }
+            }
+
+            // --- SETTINGS SLIDERS CONSOLE DRAWER ---
+            AnimatedVisibility(visible = viewModel.isToolsOpen) {
+                Column(modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 300.dp)
+                    .background(Color(0xFF020E0C))
+                    .padding(12.dp)) {
+                    LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                        item {
+                            Text("SCANNER SENSITIVITY CONSTANT: ${viewModel.scannerSensitivity.toInt()}%", color = Color.White, fontSize = 10.sp)
+                            Slider(
+                                value = viewModel.scannerSensitivity,
+                                onValueChange = {
+                                    viewModel.scannerSensitivity = it
+                                    viewModel.aiConfidenceThreshold = (1f - (it / 100f)).coerceIn(0.10f, 0.85f)
+                                },
+                                valueRange = 1f..100f,
+                                colors = SliderDefaults.colors(thumbColor = Color.Yellow, activeTrackColor = Color(0xFF00FFCC))
+                            )
+                        }
+                        item {
+                            Spacer(Modifier.height(8.dp))
+                            Button(onClick = { viewModel.cameraFacingFront = !viewModel.cameraFacingFront }, modifier = Modifier.fillMaxWidth()) {
+                                Text("FLIP CAMERA")
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -410,82 +397,166 @@ fun TargetOverlayLayer(detections: List<Detection>, liveCameraBitmap: Bitmap?) {
 
 @Composable
 fun UpgradedTargetTrackingPod(title: String, detection: Detection?, parentFrameBitmap: Bitmap?) {
-    // Generate a cropped sub-bitmap image live for the locked target pod
     val croppedBitmap = remember(detection, parentFrameBitmap) {
-        if (detection != null && parentFrameBitmap != null) {
-            cropTargetBounds(parentFrameBitmap, detection.bounds)
+        if (detection != null && parentFrameBitmap != null && !parentFrameBitmap.isRecycled) {
+            try {
+                val b = detection.bounds
+                val left = (b.left * parentFrameBitmap.width).toInt().coerceIn(0, parentFrameBitmap.width - 1)
+                val top = (b.top * parentFrameBitmap.height).toInt().coerceIn(0, parentFrameBitmap.height - 1)
+                val right = (b.right * parentFrameBitmap.width).toInt().coerceIn(left + 1, parentFrameBitmap.width)
+                val bottom = (b.bottom * parentFrameBitmap.height).toInt().coerceIn(top + 1, parentFrameBitmap.height)
+                Bitmap.createBitmap(parentFrameBitmap, left, top, right - left, bottom - top)
+            } catch (e: Exception) { null }
         } else null
     }
 
-    Column(
-        modifier = Modifier
-            .width(160.dp)
-            .height(115.dp)
-            .border(1.dp, Color.Green)
-            .background(Color(0x1100FF00))
-            .padding(4.dp)
-    ) {
+    Column(modifier = Modifier.width(130.dp).height(100.dp).border(1.dp, Color.Green).background(Color(0x4D000000)).padding(2.dp)) {
         Text(title, color = Color.Green, fontSize = 8.sp, maxLines = 1)
-        Spacer(modifier = Modifier.height(2.dp))
-        
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(65.dp)
-                .background(Color.Black)
-                .border(0.5.dp, Color(0x3300FF00))
-        ) {
-            if (croppedBitmap != null && !croppedBitmap.isRecycled) {
-                // Renders the live zoomed target crop inside the tactical frame
-                Image(
-                    bitmap = croppedBitmap.asImageBitmap(),
-                    contentDescription = "Target Lock Video Source",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-                
-                // Intersecting Target Grid overlay on top of the image crop
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawLine(Color(0x6600FF00), Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), strokeWidth = 1f)
-                    drawLine(Color(0x6600FF00), Offset(0f, size.height / 2), Offset(size.width, size.height / 2), strokeWidth = 1f)
-                }
-            } else {
-                Text(
-                    "NO TARGET LOCK", 
-                    color = Color.DarkGray, 
-                    fontSize = 9.sp, 
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
+        Box(modifier = Modifier.fillMaxWidth().height(60.dp).background(Color.Black)) {
+            if (croppedBitmap != null) Image(croppedBitmap.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
-        
-        Spacer(modifier = Modifier.weight(1f))
-        Text(
-            text = if (detection != null) {
-                "LOCK VERIFIED // CLS: ${detection.classId} // POS: X${detection.sectorX}"
-            } else "SYSTEM SCANNING...",
-            color = Color.Green,
-            fontSize = 7.sp,
-            maxLines = 1
-        )
+        Text(if(detection != null) "LOCK READY" else "SCANNING", color = Color.Green, fontSize = 7.sp)
     }
 }
 
-fun cropTargetBounds(sourceBitmap: Bitmap, normalizedBounds: android.graphics.RectF): Bitmap? {
-    if (sourceBitmap.isRecycled) return null
-    try {
-        // Convert normalized coordinates (0.0 to 1.0) to actual pixel dimensions
-        val left = (normalizedBounds.left * sourceBitmap.width).toInt().coerceIn(0, sourceBitmap.width - 1)
-        val top = (normalizedBounds.top * sourceBitmap.height).toInt().coerceIn(0, sourceBitmap.height - 1)
-        val right = (normalizedBounds.right * sourceBitmap.width).toInt().coerceIn(left + 1, sourceBitmap.width)
-        val bottom = (normalizedBounds.bottom * sourceBitmap.height).toInt().coerceIn(top + 1, sourceBitmap.height)
-        
-        val width = right - left
-        val height = bottom - top
-        if (width <= 0 || height <= 0) return null
-        
-        return Bitmap.createBitmap(sourceBitmap, left, top, width, height)
-    } catch (e: Exception) {
-        return null
+@Composable
+fun TargetTrackingReticleOverlay(detections: List<Detection>, viewModel: TacticalStateViewModel) {
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val lockPoint = viewModel.manualLockPoint
+
+        if (viewModel.radarSweepEnabled) {
+            drawCircle(Color(0x4000FFCC), size.minDimension / 3f, center, style = Stroke(1f))
+        }
+
+        // Look for the detection closest to our tap point to assign lockedTrackId
+        if (lockPoint != null) {
+            val closestTarget = detections.minByOrNull { target ->
+                val dx = target.bounds.centerX() - lockPoint.x
+                val dy = target.bounds.centerY() - lockPoint.y
+                (dx * dx) + (dy * dy)
+            }
+            if (closestTarget != null) {
+                viewModel.lockedTrackId = closestTarget.trackId
+            }
+        }
+
+        detections.forEach { target ->
+            val tX = target.bounds.centerX() * size.width
+            val tY = target.bounds.centerY() * size.height
+
+            val isTargetLocked = (target.trackId == viewModel.lockedTrackId)
+            // Swap color to sharp Orange when target lock is verified
+            val boxColor = if (isTargetLocked) Color(0xFFFF9900) else Color(0xFF00FFCC)
+
+            val left = target.bounds.left * size.width
+            val top = target.bounds.top * size.height
+            val right = target.bounds.right * size.width
+            val bottom = target.bounds.bottom * size.height
+            val cornerSize = minOf(right - left, bottom - top) * 0.25f
+
+            // Connection line to radar center
+            drawLine(if (isTargetLocked) Color(0xAAFF9900) else Color(0xAA8B6425), center, Offset(tX, tY), strokeWidth = 1f)
+
+            // Corner bracket overlays
+            drawLine(boxColor, Offset(left, top), Offset(left + cornerSize, top), strokeWidth = 4f)
+            drawLine(boxColor, Offset(left, top), Offset(left, top + cornerSize), strokeWidth = 4f)
+            drawLine(boxColor, Offset(right, bottom), Offset(right - cornerSize, bottom), strokeWidth = 4f)
+            drawLine(boxColor, Offset(right, bottom), Offset(right, bottom - cornerSize), strokeWidth = 4f)
+
+            if (isTargetLocked) {
+                // Draw crosshairs through the center of the manually isolated target area
+                drawLine(Color(0xAAFF9900), Offset(left, tY), Offset(right, tY), strokeWidth = 1f)
+                drawLine(Color(0xAAFF9900), Offset(tX, top), Offset(tX, bottom), strokeWidth = 1f)
+            }
+        }
+    }
+}
+
+@Composable
+fun MapViewportMock(viewModel: TacticalStateViewModel = viewModel()) {
+    var mapController by remember { mutableStateOf<MapController?>(null) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF010603))
+    ) {
+        // --- 1. OPEN-SOURCE REGISTRATION-FREE 3D ENGINE VIEW ---
+        AndroidView(
+            factory = { context ->
+                MapView(context).apply {
+                    getMapAsync { controller ->
+                        mapController = controller
+
+                        // Set up the tactical camera viewpoint matching your picture framing specs
+                        val cameraPosition = CameraPosition().apply {
+                            longitude = -0.6521
+                            latitude = 53.5889
+                            zoom = viewModel.mapZoom
+                            tilt = 60f * (Math.PI.toFloat() / 180f)       // CRITICAL: True isometric perspective angle slope
+                            rotation = 15f * (Math.PI.toFloat() / 180f)     // Rotates map direction vectors for heads-up styling
+                        }
+                        controller?.updateCameraPosition(CameraUpdateFactory.newCameraPosition(cameraPosition))
+
+                        // Load a local matrix dark green configuration asset file
+                        // (You can style map colors down to raw line paths via this asset configuration)
+                        controller?.loadSceneFile("asset:///tactical_scene.yaml")
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            update = { view ->
+                mapController?.updateCameraPosition(CameraUpdateFactory.setZoom(viewModel.mapZoom))
+            }
+        )
+
+        // --- 2. HUD TEXT PARAMETER OVERLAY ---
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 25.dp, start = 20.dp, end = 20.dp)
+        ) {
+            Text("MINOS // TACTICAL MAP", color = Color(0xFF00FF44), fontSize = 17.sp, letterSpacing = 1.sp)
+            Text("GPS: LOCAL ENGAGED", color = Color(0xFF00FF44), fontSize = 13.sp)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("TRAIL: 6", color = Color(0xFF00FF44), fontSize = 13.sp)
+                Text("MARKERS: 0", color = Color(0xFF00FF44), fontSize = 13.sp)
+                Text("ZOOM: ${viewModel.mapZoom.toInt()}", color = Color(0xFF00FF44), fontSize = 13.sp)
+            }
+            Text("MODE: 3D VECTOR   BUILDINGS: ${if (viewModel.show3DBuildings) "ON" else "OFF"}", color = Color(0xFF00FF44), fontSize = 13.sp)
+        }
+
+        // --- 3. HARDWARE CONTROL FOOTER LAYOUT INTERFACES ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 85.dp)
+                .height(40.dp)
+                .background(Color(0xFF010603))
+                .border(0.5.dp, Color(0x5500FF44)),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            val footerBtnStyle = Modifier.weight(1f).fillMaxHeight().wrapContentHeight(Alignment.CenterVertically)
+
+            Text("CEN", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle)
+            Text("FOLL", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle)
+            Text("3D", color = if (viewModel.show3DBuildings) Color.White else Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle.clickable { viewModel.show3DBuildings = !viewModel.show3DBuildings })
+            Text("BUILD", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle)
+            Text("ADD", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle)
+            Text("LOA", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center, modifier = footerBtnStyle)
+
+            Text("ZOO+", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center,
+                modifier = footerBtnStyle.clickable { viewModel.mapZoom = (viewModel.mapZoom + 0.5f).coerceAtMost(21f) }
+            )
+            Text("ZOO-", color = Color(0xFF00FF44), fontSize = 11.sp, textAlign = TextAlign.Center,
+                modifier = footerBtnStyle.clickable { viewModel.mapZoom = (viewModel.mapZoom - 0.5f).coerceAtLeast(10f) }
+            )
+        }
+
+        // Peripheral tech frame layout lines
+        Box(modifier = Modifier.fillMaxSize().border(2.dp, Color(0xFF00FF44)))
     }
 }

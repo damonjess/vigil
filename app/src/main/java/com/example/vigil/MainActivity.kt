@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
@@ -85,6 +86,7 @@ class MainActivity : ComponentActivity() {
     private var currentRecording: Recording? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
@@ -219,11 +221,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // MAIN BOX WITH SAFE INSETS
+        // MAIN BOX - Full Screen for Camera
         Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .windowInsetsPadding(WindowInsets.safeDrawing)
+            modifier = Modifier.fillMaxSize()
         ) {
             AndroidView(
                 factory = { ctx ->

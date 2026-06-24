@@ -1,0 +1,21 @@
+cameras:
+    tactical:
+        type: perspective
+
+sources:
+    osm:
+        type: TopoJSON
+        url:  https://tile.nextzen.org/tilezen/vector/v1/all/{z}/{x}/{y}.topojson
+
+layers:
+    buildings:
+        data: { source: osm, layer: buildings }
+        draw:
+            polygons:
+                order: 30
+                color: [0.0, 1.0, 0.27, 0.3] # Semitransparent green building infills
+            lines:
+                order: 31
+                color: [0.0, 1.0, 0.27, 0.9] # Glowing green wireframe structural boundaries
+                width: 1.5px
+        extrude: true # Tells the open-source pipeline to extrude blocks into true 3D space

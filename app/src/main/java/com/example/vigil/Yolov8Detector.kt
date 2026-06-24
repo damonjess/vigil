@@ -3,6 +3,7 @@ package com.example.vigil
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
@@ -20,8 +21,6 @@ data class Detection(
     var personId: String = "",
     var plateText: String = "",
     val trackId: Int = -1,
-    // Tactical HUD Additions
-    val targetLockStatus: String = "NORMAL",
     val sectorX: Int = (bounds.centerX() * 1000).toInt(),
     val sectorY: Int = (bounds.centerY() * 1000).toInt()
 )
@@ -37,20 +36,33 @@ data class SpeedInfo(
 
 class Yolov8Detector(context: Context) : AutoCloseable {
     companion object {
+        private const val TAG = "Yolov8Detector"
         private const val MODEL_PATH = "models/yolov8n_float32.tflite"
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 80
         private const val NUM_BOXES = 8400
-        private const val CONF_THRESHOLD = 0.22f
-        private const val IOU_THRESHOLD = 0.28f
+        private const val DEFAULT_CONF_THRESHOLD = 0.25f
+        private const val DEFAULT_IOU_THRESHOLD = 0.45f
     }
 
-    var relevantClasses: Set<Int> = (0 until NUM_CLASSES).toSet()
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
-    private val labels: List<String> = context.assets.open("labelmap.txt").bufferedReader().readLines().filter { it.isNotBlank() }
     
-    // Persistent memory instances to eliminate GC Churn drops
+    // Compatibility fields for MainActivity
+    var lastError: String? = null
+        private set
+    var peakRelevantScore: Float = 0f
+        private set
+    var peakRelevantLabel: String = "none"
+        private set
+
+    val labels: List<String> = try {
+        context.assets.open("labelmap.txt").bufferedReader().readLines().filter { it.isNotBlank() }
+    } catch(e: Exception) {
+        lastError = "Labels load failed: ${e.message}"
+        List(80) { "Object $it" }
+    }
+    
     private val contentCanvasBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
     private val executionCanvas = android.graphics.Canvas(contentCanvasBitmap)
     private val matrixTransform = android.graphics.Matrix()
@@ -58,14 +70,6 @@ class Yolov8Detector(context: Context) : AutoCloseable {
     private val byteBufferAllocation = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3).apply {
         order(ByteOrder.nativeOrder())
     }
-
-    var lastRawMaxScore: Float = 0f
-    var lastRawMaxLabel: String = "none"
-    var lastError: String? = null
-    var peakRelevantScore: Float = 0f
-    var peakRelevantLabel: String = "none"
-
-    fun resetPeak() { peakRelevantScore = 0f; peakRelevantLabel = "none" }
 
     init {
         try {
@@ -75,8 +79,8 @@ class Yolov8Detector(context: Context) : AutoCloseable {
                 try {
                     gpuDelegate = GpuDelegate()
                     addDelegate(gpuDelegate)
-                    setNumThreads(1)
                 } catch (e: Exception) {
+                    Log.w(TAG, "GPU Delegate failed, falling back to CPU", e)
                     setUseXNNPACK(true)
                     setNumThreads(4)
                 }
@@ -84,21 +88,25 @@ class Yolov8Detector(context: Context) : AutoCloseable {
             interpreter = Interpreter(buffer, options)
         } catch (e: Exception) {
             lastError = "${e::class.simpleName}: ${e.message}"
+            Log.e(TAG, "Interpreter init failed", e)
         }
     }
 
     fun isReady() = interpreter != null
 
-    fun detect(bitmap: Bitmap): List<Detection> {
+    fun detect(
+        bitmap: Bitmap, 
+        confidenceThreshold: Float = DEFAULT_CONF_THRESHOLD, 
+        iouThreshold: Float = DEFAULT_IOU_THRESHOLD
+    ): List<Detection> {
         val engine = interpreter ?: return emptyList()
-        val startTime = System.currentTimeMillis()
         try {
             val preprocessed = preprocess(bitmap)
             val output = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(NUM_BOXES) } }
             engine.run(preprocessed.buffer, output)
-            val results = decode(output[0], preprocessed)
-            return results
+            return decode(output[0], preprocessed, confidenceThreshold, iouThreshold)
         } catch (e: Exception) {
+            lastError = "Detection error: ${e.message}"
             return emptyList()
         }
     }
@@ -112,7 +120,6 @@ class Yolov8Detector(context: Context) : AutoCloseable {
         val padX = (INPUT_SIZE - srcW * scale) / 2f
         val padY = (INPUT_SIZE - srcH * scale) / 2f
 
-        // Reset and use the persistent structural canvas layout
         executionCanvas.drawColor(android.graphics.Color.rgb(114, 114, 114))
         matrixTransform.reset()
         matrixTransform.postScale(scale, scale)
@@ -123,17 +130,15 @@ class Yolov8Detector(context: Context) : AutoCloseable {
         contentCanvasBitmap.getPixels(framePixelsBuffer, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
         
         for (p in framePixelsBuffer) {
-            byteBufferAllocation.putFloat(((p listShr 16) and 0xFF) / 255.0f)
-            byteBufferAllocation.putFloat(((p listShr 8) and 0xFF) / 255.0f)
+            byteBufferAllocation.putFloat(((p shr 16) and 0xFF) / 255.0f)
+            byteBufferAllocation.putFloat(((p shr 8) and 0xFF) / 255.0f)
             byteBufferAllocation.putFloat((p and 0xFF) / 255.0f)
         }
         byteBufferAllocation.rewind()
         return PreprocessingResult(byteBufferAllocation, scale, padX, padY, srcW, srcH)
     }
 
-    private infix fun Int.listShr(bitCount: Int): Int = this shr bitCount
-
-    private fun decode(output: Array<FloatArray>, preprocessed: PreprocessingResult): List<Detection> {
+    private fun decode(output: Array<FloatArray>, preprocessed: PreprocessingResult, confThreshold: Float, iouThreshold: Float): List<Detection> {
         val candidates = mutableListOf<RawBox>()
         for (i in 0 until NUM_BOXES) {
             var bestClass = -1
@@ -142,24 +147,30 @@ class Yolov8Detector(context: Context) : AutoCloseable {
                 val s = output[4 + c][i]
                 if (s > bestScore) { bestScore = s; bestClass = c }
             }
-            if (bestClass in relevantClasses && bestScore > peakRelevantScore) {
+            
+            // Update peak stats for any class detected above a minimal threshold
+            if (bestScore > peakRelevantScore) {
                 peakRelevantScore = bestScore
-                peakRelevantLabel = labels.getOrElse(bestClass) { "?" }
+                peakRelevantLabel = labels.getOrElse(bestClass) { "Object $bestClass" }
             }
-            if (bestScore >= CONF_THRESHOLD && bestClass in relevantClasses) {
+
+            if (bestScore >= confThreshold) {
                 candidates.add(RawBox(output[0][i], output[1][i], output[2][i], output[3][i], bestClass, bestScore))
             }
         }
+        
         val finalBoxes = mutableListOf<RawBox>()
-        for (cls in relevantClasses) {
-            val boxes = candidates.filter { it.classId == cls }.sortedByDescending { it.conf }.toMutableList()
-            while (boxes.isNotEmpty()) {
-                val best = boxes.removeAt(0)
+        val groupedClasses = candidates.groupBy { it.classId }
+        for ((_, boxes) in groupedClasses) {
+            val sortedBoxes = boxes.sortedByDescending { it.conf }.toMutableList()
+            while (sortedBoxes.isNotEmpty()) {
+                val best = sortedBoxes.removeAt(0)
                 finalBoxes.add(best)
-                boxes.removeAll { iou(best, it) > IOU_THRESHOLD }
+                sortedBoxes.removeAll { iou(best, it) > iouThreshold }
             }
         }
-        return finalBoxes.mapNotNull { raw ->
+        
+        return finalBoxes.map { raw ->
             val cxPix = raw.cx * INPUT_SIZE
             val cyPix = raw.cy * INPUT_SIZE
             val wPix = raw.w * INPUT_SIZE
@@ -168,14 +179,14 @@ class Yolov8Detector(context: Context) : AutoCloseable {
             val origCy = (cyPix - preprocessed.padY) / preprocessed.scale
             val origW = wPix / preprocessed.scale
             val origH = hPix / preprocessed.scale
-            if ((origW * origH) / (preprocessed.origW * preprocessed.origH) < 0.0015f) return@mapNotNull null
+            
             val bounds = RectF(
                 ((origCx - origW / 2f) / preprocessed.origW).coerceIn(0f, 1f),
                 ((origCy - origH / 2f) / preprocessed.origH).coerceIn(0f, 1f),
                 ((origCx + origW / 2f) / preprocessed.origW).coerceIn(0f, 1f),
                 ((origCy + origH / 2f) / preprocessed.origH).coerceIn(0f, 1f)
             )
-            Detection(labels.getOrElse(raw.classId) { "?" }, raw.classId, raw.conf, bounds)
+            Detection(labels.getOrElse(raw.classId) { "Object" }, raw.classId, raw.conf, bounds)
         }
     }
 
