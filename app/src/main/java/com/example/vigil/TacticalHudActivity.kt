@@ -2,6 +2,8 @@ package com.example.vigil
 
 import android.Manifest
 import android.content.Context
+import android.location.LocationListener
+import android.location.LocationManager
 import android.graphics.Bitmap
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
@@ -62,6 +64,8 @@ import org.osmdroid.config.Configuration
 import com.mapzen.tangram.MapController
 import com.mapzen.tangram.MapView
 import com.mapzen.tangram.CameraPosition
+import com.mapzen.tangram.LngLat
+import com.mapzen.tangram.Marker
 import androidx.compose.ui.text.font.FontWeight
 import com.mapzen.tangram.CameraUpdateFactory
 import com.example.vigil.data.DetectionLog
@@ -89,6 +93,9 @@ class TacticalStateViewModel : ViewModel() {
 
     var mapZoom by mutableFloatStateOf(18f)
     var show3DBuildings by mutableStateOf(true)
+    var userLat by mutableDoubleStateOf(53.5889)   // fallback default until first GPS fix
+    var userLon by mutableDoubleStateOf(-0.6521)
+    var hasLiveFix by mutableStateOf(false)
     var mapTrailCount by mutableIntStateOf(6)
 
     // Call this to clear manual target locks
@@ -315,9 +322,47 @@ private fun cropPlateRegion(bitmap: Bitmap, bounds: RectF): Bitmap? {
     }
 }
 
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun TacticalMainLayout(viewModel: TacticalStateViewModel = viewModel()) {
     val context = LocalContext.current
+
+    val locationPermissionState = rememberPermissionState(android.Manifest.permission.ACCESS_FINE_LOCATION)
+
+    DisposableEffect(locationPermissionState.status.isGranted) {
+        val listeners = mutableListOf<LocationListener>()
+        if (locationPermissionState.status.isGranted) {
+            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+            val commonListener = LocationListener { location ->
+                viewModel.userLat = location.latitude
+                viewModel.userLon = location.longitude
+                viewModel.hasLiveFix = true
+            }
+
+            listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { provider ->
+                if (locationManager.isProviderEnabled(provider)) {
+                    try {
+                        locationManager.requestLocationUpdates(provider, 2000L, 3f, commonListener)
+                        if (!listeners.contains(commonListener)) listeners.add(commonListener)
+                    } catch (e: SecurityException) {
+                        Log.e("TacticalLocation", "Permission denied requesting $provider", e)
+                    }
+                }
+            }
+        }
+        onDispose {
+            val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            listeners.forEach { locationManager.removeUpdates(it) }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!locationPermissionState.status.isGranted) {
+            locationPermissionState.launchPermissionRequest()
+        }
+    }
+
     val liveDetections by viewModel.liveDetections.collectAsState()
     val currentFrame by viewModel.currentFrameBitmap.collectAsState()
     val logs by viewModel.consoleLogs.collectAsState()
@@ -695,6 +740,7 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
     // Remember MapView structure across recompositions
     val mapView = remember { MapView(context) }
     var mapController by remember { mutableStateOf<MapController?>(null) }
+    var userMarker by remember { mutableStateOf<Marker?>(null) }
 
     // Synchronize full Android lifecycle hooks with the Compose UI lifecycle
     DisposableEffect(lifecycleOwner) {
@@ -754,25 +800,40 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
                 mapView.apply {
                     getMapAsync { controller ->
                         mapController = controller
-                        
-                        // Configure your initial tactical HUD camera stance
+
+                        controller?.setSceneLoadListener { sceneId, sceneError ->
+                            if (sceneError != null) {
+                                Log.e("TangramScene", "Scene load FAILED — error: ${sceneError.error}, source: ${sceneError.sceneUpdate?.path}")
+                            } else {
+                                Log.d("TangramScene", "Scene loaded OK, id=$sceneId")
+                            }
+                        }
+
                         val cameraPosition = CameraPosition().apply {
-                            longitude = -0.6521
-                            latitude = 53.5889
+                            longitude = viewModel.userLon
+                            latitude = viewModel.userLat
                             zoom = viewModel.mapZoom
                             tilt = 60f * (Math.PI.toFloat() / 180f)
                             rotation = 15f * (Math.PI.toFloat() / 180f)
                         }
                         controller?.updateCameraPosition(CameraUpdateFactory.newCameraPosition(cameraPosition))
-                        
-                        // Load the tactical scene file from assets
+
                         controller?.loadSceneFile("asset:///tactical_scene.yaml")
+
+                        userMarker = controller?.addMarker()?.apply {
+                            setStylingFromString("{ style: 'points', color: '#00FF44', size: [16px, 16px] }")
+                            setPoint(LngLat(viewModel.userLon, viewModel.userLat))
+                        }
                     }
                 }
             },
             modifier = Modifier.fillMaxSize(),
             update = { _ ->
                 mapController?.updateCameraPosition(CameraUpdateFactory.setZoom(viewModel.mapZoom))
+                mapController?.updateCameraPosition(
+                    CameraUpdateFactory.setPosition(LngLat(viewModel.userLon, viewModel.userLat))
+                )
+                userMarker?.setPoint(LngLat(viewModel.userLon, viewModel.userLat))
             }
         )
 
@@ -780,11 +841,16 @@ fun MapViewportMock(viewModel: TacticalStateViewModel = androidx.lifecycle.viewm
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 25.dp, start = 20.dp, end = 20.dp)
+                .background(Color(0xCC010603))   // semi-opaque dark plate so buildings can't show through
+                .padding(top = 25.dp, start = 20.dp, end = 20.dp, bottom = 12.dp)
         ) {
             Text("MINOS // TACTICAL MAP", color = Color(0xFF00FF44), fontSize = 17.sp, letterSpacing = 1.sp)
             Text("STANDALONE VECTOR PERSISTENCE / LOCAL CACHE ACTIVE", color = Color(0xFF00FF41), fontSize = 11.sp)
-            Text("GPS: LOCAL ENGAGED", color = Color(0xFF00FF44), fontSize = 13.sp)
+            Text(
+                if (viewModel.hasLiveFix) "GPS: LOCK ACQUIRED" else "GPS: ACQUIRING...",
+                color = if (viewModel.hasLiveFix) Color(0xFF00FF44) else Color(0xFFFFAA00),
+                fontSize = 13.sp
+            )
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("TRAIL: 6", color = Color(0xFF00FF44), fontSize = 13.sp)
                 Text("MARKERS: 0", color = Color(0xFF00FF44), fontSize = 13.sp)

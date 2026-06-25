@@ -10,7 +10,8 @@ cameras:
 sources:
   osm:
     type: MVT
-    url: https://tiles.openfreemap.org/planet/{z}/{x}/{y}.pbf
+    url: https://tiles.openfreemap.org/planet/20260614_080001_pt/{z}/{x}/{y}.pbf
+    max_zoom: 14
 
 layers:
   water:
