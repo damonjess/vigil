@@ -3,11 +3,11 @@ package com.example.vigil
 import android.graphics.*
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
+import android.media.ImageFormat
 
 fun ImageProxy.toBitmap(): Bitmap? {
-    // Standard RGBA_8888 format (from ImageAnalysis output)
-    // format 1 corresponds to PixelFormat.RGBA_8888
-    if (format == 1) {
+    // Standard ARGB_8888 format (from ImageAnalysis output)
+    if (format == ImageFormat.YUV_420_888) {
         val buffer = planes[0].buffer
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         buffer.rewind()

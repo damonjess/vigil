@@ -40,7 +40,7 @@ class HighResCapture {
                         val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
                         try {
                             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true).also {
-                                if (it !== bitmap) bitmap.recycle()
+                                if (it != bitmap) bitmap.recycle()
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "Rotation failed", e)
