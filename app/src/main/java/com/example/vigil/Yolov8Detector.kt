@@ -21,8 +21,8 @@ data class Detection(
     var personId: String = "",
     var plateText: String = "",
     val trackId: Int = -1,
-    val sectorX: Int = (bounds.centerX() * 1000).toInt(),
-    val sectorY: Int = (bounds.centerY() * 1000).toInt()
+    val sectorX: Int,
+    val sectorY: Int
 )
 
 data class SpeedInfo(
@@ -59,7 +59,7 @@ class Yolov8Detector(context: Context) : AutoCloseable {
     val labels: List<String> = try {
         context.assets.open("labelmap.txt").bufferedReader().readLines().filter { it.isNotBlank() }
     } catch(e: Exception) {
-        lastError = "Labels load failed: ${e.message}"
+        lastError = "Labels load failed: ${"${e.message}"}"
         List(80) { "Object $it" }
     }
     
@@ -87,7 +87,7 @@ class Yolov8Detector(context: Context) : AutoCloseable {
             }
             interpreter = Interpreter(buffer, options)
         } catch (e: Exception) {
-            lastError = "${e::class.simpleName}: ${e.message}"
+            lastError = "${"${e::class.simpleName}"}: ${"${e.message}"}"
             Log.e(TAG, "Interpreter init failed", e)
         }
     }
@@ -106,7 +106,7 @@ class Yolov8Detector(context: Context) : AutoCloseable {
             engine.run(preprocessed.buffer, output)
             return decode(output[0], preprocessed, confidenceThreshold, iouThreshold)
         } catch (e: Exception) {
-            lastError = "Detection error: ${e.message}"
+            lastError = "Detection error: ${"${e.message}"}"
             return emptyList()
         }
     }
@@ -186,7 +186,7 @@ class Yolov8Detector(context: Context) : AutoCloseable {
                 ((origCx + origW / 2f) / preprocessed.origW).coerceIn(0f, 1f),
                 ((origCy + origH / 2f) / preprocessed.origH).coerceIn(0f, 1f)
             )
-            Detection(labels.getOrElse(raw.classId) { "Object" }, raw.classId, raw.conf, bounds)
+            Detection(labels.getOrElse(raw.classId) { "Object" }, raw.classId, raw.conf, bounds, sectorX = ((bounds.centerX() * 1000).toInt()), sectorY = ((bounds.centerY() * 1000).toInt()))
         }
     }
 
